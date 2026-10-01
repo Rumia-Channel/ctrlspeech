@@ -11,20 +11,23 @@ The first foundation layer is present:
   - OpenJTalk G2P
   - NJD accent/mora metadata
   - OpenJTalk full-context labels
-  - whitespace segmentation for Japanese MFA
+  - diagnostic whitespace segmentation for Japanese text
 - ctrlspeech.align.JapaneseMFAAligner
   - japanese_mfa acoustic model
   - japanese_mfa pronunciation dictionary
-  - automatic OpenJTalk-based word segmentation before MFA
+  - japanese_mfa G2P for OOV words
+  - MFA's Japanese/Sudachi tokenizer for forced alignment
 
 Install the Japanese frontend dependency with:
 
     pip install -e '.[japanese]'
 
-Install the MFA models separately:
+Install the MFA models and Japanese tokenizer dependencies separately:
 
     mfa model download acoustic japanese_mfa
     mfa model download dictionary japanese_mfa
+    mfa model download g2p japanese_mfa
+    conda install -c conda-forge spacy sudachipy sudachidict-core
 
 Inspect Japanese text:
 
@@ -42,6 +45,11 @@ Prepare an aligner:
     from ctrlspeech.align import JapaneseMFAAligner
 
     aligner = JapaneseMFAAligner()
+
+JapaneseMFAAligner keeps the original transcript for MFA. MFA 3.x performs the
+Japanese morphological tokenization itself and can invoke japanese_mfa G2P for
+out-of-vocabulary words. OpenJTalk segmentation is retained only as a diagnostic
+view for the future model frontend.
 
 ## Important limitation
 
