@@ -28,27 +28,33 @@ target text ──┘         ▲
 
 ## Install
 
+This branch uses **uv** for Python and dependency management. Python 3.11 is
+recommended; the package requires Python 3.10 or newer.
+
 ```bash
-conda create -n ctrlspeech python=3.11 -y
-conda activate ctrlspeech
+uv python install 3.11
+uv sync
 
-# Match torch to your CUDA version first
-pip install torch==2.4.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
-
-pip install -e .              # or: pip install -r requirements.txt
+# Japanese frontend (pyopenjtalk-plus)
+uv sync --extra japanese
 ```
 
-That single install covers the library, the CLI and the Panel demo.
+Use `uv run` for commands so they always execute inside the project
+environment.
 
 **Montreal Forced Aligner** is required for anything that derives phoneme
 boundaries from audio (duration editing, and adopting your own recording as a
-baseline). It is conda-only:
+baseline). MFA is treated as an external system command rather than a uv
+dependency because its Kaldi runtime is not self-contained through PyPI on all
+platforms. Once an `mfa` executable is available on PATH:
 
 ```bash
-conda install -c conda-forge montreal-forced-aligner
 mfa model download acoustic english_us_arpa
 mfa model download dictionary english_us_arpa
 ```
+
+For Japanese work, also install the `japanese_mfa` acoustic, dictionary and
+G2P models; see `JAPANESE.md`.
 
 Plain synthesis from a pre-aligned annotation works without MFA.
 
@@ -80,26 +86,25 @@ result.save("higher.wav")
 
 ```bash
 # Raise pitch, keep everything else
-ctrlspeech --audio clip.wav --transcript-text "..." --pitch-shift 5 --out out.wav
+uv run ctrlspeech --audio clip.wav --transcript-text "..." --pitch-shift 5 --out out.wav
 
 # Stretch one word to 2x, then verify the result with MFA
-ctrlspeech --audio clip.wav --transcript-text "..." \
+uv run ctrlspeech --audio clip.wav --transcript-text "..." \
     --stretch-word dreams --stretch-ratio 2 --out out.wav
 
 # Full two-pass synthesis: prompt supplies the voice, the target recording
 # supplies reference timing for its own text
-ctrlspeech --prompt-wav demo/assets/dreams-prompt.wav --prompt-text demo/assets/dreams-prompt.txt \
+uv run ctrlspeech --prompt-wav demo/assets/dreams-prompt.wav --prompt-text demo/assets/dreams-prompt.txt \
     --target-wav demo/assets/dreams-target.wav --target-text demo/assets/dreams-target.txt \
     --loudness-shift 8 --out out.wav
 ```
 
-From a checkout without installing, use `python scripts/generate.py` instead of
-`ctrlspeech`.
+From a checkout, use `uv run python scripts/generate.py` if you prefer the script entry point.
 
 ### Interactive demo
 
 ```bash
-panel serve demo/app.py --show --port 5006
+uv run panel serve demo/app.py --show --port 5006
 ```
 
 Over SSH, forward the port from your laptop (`ssh -L 5006:localhost:5006 host`)
