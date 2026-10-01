@@ -1,4 +1,7 @@
-"""Japanese text frontend built on pyopenjtalk.
+"""Japanese text frontend built on pyopenjtalk-plus.
+
+The distribution name is pyopenjtalk-plus while its import name remains
+pyopenjtalk for drop-in compatibility with upstream pyopenjtalk.
 
 This module deliberately stops at linguistic preprocessing. The published
 CtrlSpeech checkpoints use an English-oriented phone vocabulary, so feeding
@@ -9,8 +12,7 @@ this frontend can be wired into inference.
 The frontend exposes two views of the same sentence:
 
 * OpenJTalk phones and NJD accent metadata for model/data preprocessing.
-* A whitespace-segmented orthographic transcript suitable for the Japanese MFA
-  dictionary/acoustic model.
+* A whitespace-segmented orthographic transcript for alignment diagnostics.
 """
 
 from __future__ import annotations
@@ -63,11 +65,11 @@ class JapaneseFrontendResult:
 
 
 class JapaneseFrontend:
-    """Japanese normalization, G2P, NJD metadata and MFA tokenization.
+    """Japanese normalization, G2P, NJD metadata and alignment tokenization.
 
     backend is injectable for tests. In production it defaults to the
-    pyopenjtalk module and is loaded lazily so English-only installations do
-    not acquire a hard dependency on OpenJTalk.
+    pyopenjtalk module provided by the pyopenjtalk-plus distribution and is
+    loaded lazily so installations without the Japanese extra still import.
     """
 
     def __init__(self, backend=None, normalization: str = "NFKC"):
@@ -81,8 +83,8 @@ class JapaneseFrontend:
                 import pyopenjtalk
             except ImportError as exc:
                 raise RuntimeError(
-                    "Japanese preprocessing needs pyopenjtalk. Install it with "
-                    "pip install -e '.[japanese]'."
+                    "Japanese preprocessing needs pyopenjtalk-plus. "
+                    "Run 'uv sync --extra japanese'."
                 ) from exc
             self._backend = pyopenjtalk
         return self._backend
@@ -180,7 +182,7 @@ class JapaneseFrontend:
         return tuple(self.backend.g2p(normalized, kana=False, join=False))
 
     def to_mfa_transcript(self, text: str) -> str:
-        """Segment Japanese orthography into the word sequence MFA expects."""
+        """Segment Japanese orthography for alignment diagnostics."""
         result = self.analyze(text, include_fullcontext=False)
         if not result.mfa_transcript:
             raise ValueError("text did not contain any alignable Japanese words")
