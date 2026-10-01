@@ -7,11 +7,15 @@ name = "ctrlspeech"
 version = "0.1.0"
 description = "Expressive speech synthesis with coarse-to-fine latent control"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["text-to-speech", "tts", "prosody", "speech-synthesis", "diffusion"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: MIT License",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
@@ -34,15 +38,18 @@ dependencies = [
     "safetensors>=0.4",
     "huggingface-hub>=0.24",
     "tqdm>=4.65",
-    # The Panel demo. Kept in the main list rather than an extra so that
-    # pip install -e . and pip install -r requirements.txt agree.
     "panel>=1.5",
     "bokeh>=3.4",
 ]
 
 [project.optional-dependencies]
 japanese = [
-    "pyopenjtalk>=0.4.0",
+    "pyopenjtalk-plus>=0.4.1.post9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
 ]
 
 [project.scripts]
