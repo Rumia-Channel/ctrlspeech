@@ -124,7 +124,12 @@ class JapaneseMFAAligner(MFAAligner):
                 expected_phones=expected_phones,
             )
             result["source_transcript"] = transcript
-            # Useful for debugging OpenJTalk-vs-MFA tokenization without making
-            # the diagnostic segmentation part of the alignment contract.
-            result["openjtalk_mfa_transcript"] = self.prepare_transcript(transcript)
+
+            # This is diagnostic metadata only. Do not make successful MFA
+            # alignment depend on pyopenjtalk being installed or on its parser
+            # accepting a particular input sentence.
+            try:
+                result["openjtalk_mfa_transcript"] = self.prepare_transcript(transcript)
+            except (RuntimeError, ValueError):
+                pass
             return result
