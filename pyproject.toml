@@ -29,7 +29,7 @@ dependencies = [
     "librosa>=0.10",
     "soundfile>=0.12",
     "pyworld>=0.3.4",
-    "transformers>=4.51",
+    # qwen3.py is vendored from the Transformers 4.52 API surface.\n    "transformers==4.52.4",
     "einops>=0.7",
     "torchdiffeq>=0.2.4",
     "x-transformers>=1.30",
