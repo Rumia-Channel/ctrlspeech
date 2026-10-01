@@ -2,51 +2,80 @@
 
 This branch is the staging area for a Japanese-specific CtrlSpeech model.
 
+## Environment
+
+This branch uses uv as the project/environment manager. Conda is not required
+for the CtrlSpeech Python environment.
+
+The Japanese frontend uses the pyopenjtalk-plus distribution. Its import name
+remains pyopenjtalk, so the Python code intentionally still uses
+`import pyopenjtalk`.
+
+Recommended setup:
+
+```bash
+uv python install 3.11
+uv sync --extra japanese
+uv run pytest
+```
+
+The repository targets Python 3.10 or newer. Python 3.11 is the recommended
+development version.
+
 ## Current status
 
 The first foundation layer is present:
 
-- ctrlspeech.frontend.JapaneseFrontend
+- `ctrlspeech.frontend.JapaneseFrontend`
   - Unicode normalization
-  - OpenJTalk G2P
+  - OpenJTalk G2P via pyopenjtalk-plus
   - NJD accent/mora metadata
   - OpenJTalk full-context labels
   - diagnostic whitespace segmentation for Japanese text
-- ctrlspeech.align.JapaneseMFAAligner
+- `ctrlspeech.align.JapaneseMFAAligner`
   - japanese_mfa acoustic model
   - japanese_mfa pronunciation dictionary
   - japanese_mfa G2P for OOV words
   - MFA's Japanese/Sudachi tokenizer for forced alignment
 
-Install the Japanese frontend dependency with:
+### Montreal Forced Aligner
 
-    pip install -e '.[japanese]'
+MFA is intentionally treated as an external command-line dependency rather than
+part of the uv environment. The PyPI package does not by itself provide a
+self-contained Kaldi runtime on every platform, so CtrlSpeech only requires that
+an `mfa` executable is available on PATH.
 
-Install the MFA models and Japanese tokenizer dependencies separately:
+Once MFA is installed by a method appropriate for the host system, install the
+Japanese models:
 
-    mfa model download acoustic japanese_mfa
-    mfa model download dictionary japanese_mfa
-    mfa model download g2p japanese_mfa
-    conda install -c conda-forge spacy sudachipy sudachidict-core
+```bash
+mfa model download acoustic japanese_mfa
+mfa model download dictionary japanese_mfa
+mfa model download g2p japanese_mfa
+```
 
 Inspect Japanese text:
 
-    from ctrlspeech.frontend import JapaneseFrontend
+```python
+from ctrlspeech.frontend import JapaneseFrontend
 
-    ja = JapaneseFrontend()
-    x = ja.analyze("今日はいい天気ですね。")
-    print(x.phone_string)
-    print(x.mfa_transcript)
-    for token in x.morphemes:
-        print(token.surface, token.accent, token.mora_size, token.chain_flag)
+ja = JapaneseFrontend()
+x = ja.analyze("今日はいい天気ですね。")
+print(x.phone_string)
+print(x.mfa_transcript)
+for token in x.morphemes:
+    print(token.surface, token.accent, token.mora_size, token.chain_flag)
+```
 
 Prepare an aligner:
 
-    from ctrlspeech.align import JapaneseMFAAligner
+```python
+from ctrlspeech.align import JapaneseMFAAligner
 
-    aligner = JapaneseMFAAligner()
+aligner = JapaneseMFAAligner()
+```
 
-JapaneseMFAAligner keeps the original transcript for MFA. MFA 3.x performs the
+`JapaneseMFAAligner` keeps the original transcript for MFA. MFA 3.x performs
 Japanese morphological tokenization itself and can invoke japanese_mfa G2P for
 out-of-vocabulary words. OpenJTalk segmentation is retained only as a diagnostic
 view for the future model frontend.
