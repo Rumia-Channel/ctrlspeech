@@ -35,9 +35,14 @@ dependencies = [
     "huggingface-hub>=0.24",
     "tqdm>=4.65",
     # The Panel demo. Kept in the main list rather than an extra so that
-    # `pip install -e .` and `pip install -r requirements.txt` agree.
+    # pip install -e . and pip install -r requirements.txt agree.
     "panel>=1.5",
     "bokeh>=3.4",
+]
+
+[project.optional-dependencies]
+japanese = [
+    "pyopenjtalk>=0.4.0",
 ]
 
 [project.scripts]

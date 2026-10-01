@@ -1,3 +1,4 @@
+from .japanese import JapaneseMFAAligner
 from .mfa import (
     MFAAligner,
     annotate_audio,
@@ -7,6 +8,7 @@ from .mfa import (
 )
 
 __all__ = [
+    "JapaneseMFAAligner",
     "MFAAligner",
     "annotate_audio",
     "normalize_word",
