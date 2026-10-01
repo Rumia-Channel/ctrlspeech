@@ -285,10 +285,12 @@ class MFAAligner:
         mfa_bin = shutil.which("mfa")
         if mfa_bin is None:
             raise RuntimeError(
-                "The `mfa` command was not found. Install it with "
-                "`conda install -c conda-forge montreal-forced-aligner`, then "
-                "`mfa model download acoustic english_us_arpa` and "
-                "`mfa model download dictionary english_us_arpa`."
+                "The mfa command was not found on PATH. CtrlSpeech uses uv for "
+                "its Python environment, but MFA is an external system tool "
+                "because its Kaldi runtime is not self-contained on PyPI. "
+                "Install MFA separately, then run "
+                "'mfa model download acoustic english_us_arpa' and "
+                "'mfa model download dictionary english_us_arpa'."
             )
 
         wav = waveform
