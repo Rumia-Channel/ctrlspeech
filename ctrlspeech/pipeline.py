@@ -546,9 +546,23 @@ class CtrlSpeech:
         return Generation(gen_np, gen_f0, gen_loud)
 
     # -- shared sampling -------------------------------------------------
-    def _sample(self, prompt_audio, speaker_emb, input_ids, text_masks,
-                duration_segments, pitch, loudness, max_seq_length, steps,
-                cfg_strength):
+    def _sample(
+        self,
+        prompt_audio,
+        speaker_emb,
+        input_ids,
+        text_masks,
+        duration_segments,
+        pitch,
+        loudness,
+        max_seq_length,
+        steps,
+        cfg_strength,
+        *,
+        linguistic_features=None,
+        native_text_inputs=None,
+        native_text_masks=None,
+    ):
         if not self.controllable:
             # Base checkpoints never learned the prosody embeddings; feeding them
             # would add randomly initialised vectors to every text token.
@@ -562,6 +576,17 @@ class CtrlSpeech:
             duration_segments=None if duration_segments is None else [duration_segments],
             pitch=None if pitch is None else [pitch],
             loudness=None if loudness is None else [loudness],
+            linguistic_features=linguistic_features,
+            native_text_inputs=(
+                None
+                if native_text_inputs is None
+                else native_text_inputs.to(self.device)
+            ),
+            native_text_masks=(
+                None
+                if native_text_masks is None
+                else native_text_masks.to(self.device)
+            ),
             use_cache=True,
             max_seq_length=max_seq_length,
             steps=steps,
