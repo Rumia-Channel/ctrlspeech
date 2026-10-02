@@ -101,7 +101,7 @@ class LFM2SpeechBackbone(nn.Module):
 
     The LFM body remains unmodified. CtrlSpeech-specific information is
     injected before the model through separate phone and modality embeddings.
-    This preserves LFM's native token embedding table for future raw-text
+    This preserves LFM's native token embedding table for raw-text semantic
     conditioning instead of repurposing it as a phoneme vocabulary.
     """
 
@@ -182,6 +182,7 @@ class LFM2SpeechBackbone(nn.Module):
         """Freeze or unfreeze only the pretrained LFM body."""
         for parameter in self.model.parameters():
             parameter.requires_grad = bool(trainable)
+
     def compose_text_prefix(
         self,
         *,
