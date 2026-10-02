@@ -12,8 +12,9 @@ import torch.nn.utils.rnn as rnn
 from einops import rearrange, repeat
 from torchdiffeq import odeint
 
-from .embeds import TimestepEmbedding, VAEProjector
-from .modules import CausalAR, AggregationEncoder, StopPredictor, MLPStopPredictor
+from .embeds import DurationConditioner, TimestepEmbedding, VAEProjector
+from .backbone import DEFAULT_LFM2_MODEL_ID, LFM2SpeechBackbone
+from .modules import AggregationEncoder, StopPredictor, MLPStopPredictor
 from .backbone.dit import DiT
 from .vae.online_feature import load_state, process_online
 
@@ -55,13 +56,29 @@ class DiTar(nn.Module):
         self.text_vocab_size = config.text_vocab_size
         self.mlp_hidden_dim = config.mlp_hidden_dim
 
-        self.causalAR = CausalAR(
-            qwen_config_path=config.backbone.qwen_config_path,
-            pretrained_LM_path=config.backbone.pretrained_LM_path,
-            load_pretrained_weights=config.backbone.load_pretrained_weights,
-            load_phoneme=config.backbone.load_phoneme,
-            weighted_layers=config.backbone.weighted_layers,
+        backbone_model_id = getattr(
+            config.backbone, "model_id", DEFAULT_LFM2_MODEL_ID
         )
+        phone_vocab_size = int(
+            getattr(config.backbone, "phone_vocab_size", self.text_vocab_size)
+        )
+        self.causalAR = LFM2SpeechBackbone(
+            phone_vocab_size=phone_vocab_size,
+            model_id=backbone_model_id,
+            load_pretrained_weights=bool(
+                getattr(config.backbone, "load_pretrained_weights", True)
+            ),
+            weighted_layers=bool(
+                getattr(config.backbone, "weighted_layers", False)
+            ),
+        )
+        if self.causalAR.hidden_size != self.dim:
+            raise ValueError(
+                "CtrlSpeech model dim must match LFM2 hidden size: "
+                f"{self.dim} != {self.causalAR.hidden_size}"
+            )
+        if bool(getattr(config.backbone, "freeze_pretrained_body", False)):
+            self.causalAR.set_pretrained_body_trainable(False)
 
         self.vae_projector = VAEProjector(
             in_dim=self.audio_channels, 
@@ -119,9 +136,19 @@ class DiTar(nn.Module):
 
         self.pitch_embedding = nn.Embedding(128, self.dim)
         self.loudness_embedding = nn.Embedding(64, self.dim)
-        self.duration_embedding = nn.Embedding(192, self.dim)
+        self.duration_conditioner = DurationConditioner(
+            self.dim,
+            hidden_dim=max(128, self.dim // 4),
+            max_reference_frames=6000,
+        )
 
-        self.apply(self._init_weights)
+        # Preserve pretrained LFM2 and SVAE weights.  Only CtrlSpeech-specific
+        # modules are initialized here; a future checkpoint will overwrite them
+        # during inference as usual.
+        for name, module in self.named_children():
+            if name in {"causalAR", "generator"}:
+                continue
+            module.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -335,9 +362,10 @@ class DiTar(nn.Module):
 
             duration = torch.tensor(
                 [end - start if start != end else 0 for start, end in s],
-                device=self.device
+                device=self.device,
+                dtype=torch.float32,
             )
-            duration_embed = self.duration_embedding(duration)
+            duration_embed = self.duration_conditioner(duration)
             duration_embeds.append(duration_embed)
         return pitch_embeds, loudness_embeds, duration_embeds
 
@@ -345,7 +373,7 @@ class DiTar(nn.Module):
         self, vae_features, vae_padding_masks, speaker_embs, text_inputs, text_masks, 
         duration_segments=None, pitch=None, loudness=None
     ):
-        text_embeds = self.causalAR.model.embed_tokens(text_inputs)
+        text_embeds = self.causalAR.embed_phone_tokens(text_inputs)
 
         if duration_segments is not None and pitch is not None and loudness is not None:
             pitch_embeds, loudness_embeds, duration_embeds = self.get_pitch_loudness_embed(
@@ -390,9 +418,23 @@ class DiTar(nn.Module):
             )
 
         input_embeds = torch.cat([text_embeds, vae_aggregated], dim=1)
-        modality_type_ids = torch.cat([
-            torch.zeros(*text_embeds.shape[:-1]), torch.ones(*vae_aggregated.shape[:-1])
-        ], dim=1).to(self.device, dtype=torch.int64)
+        modality_type_ids = torch.cat(
+            [
+                torch.full(
+                    text_embeds.shape[:-1],
+                    self.causalAR.PHONE_MODALITY,
+                    device=self.device,
+                    dtype=torch.int64,
+                ),
+                torch.full(
+                    vae_aggregated.shape[:-1],
+                    self.causalAR.AUDIO_MODALITY,
+                    device=self.device,
+                    dtype=torch.int64,
+                ),
+            ],
+            dim=1,
+        )
 
         return (
             input_embeds,
