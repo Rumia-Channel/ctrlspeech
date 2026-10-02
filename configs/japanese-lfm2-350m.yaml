@@ -1,0 +1,54 @@
+model:
+  name: DiTAR
+  text_vocab_size: 64
+  audio_type: vae_online
+  audio_channels: 64
+  patch_size: 4
+  dim: 1024
+  mlp_hidden_dim: 512
+  use_seperate_linear: true
+
+  aggregation_encoder:
+    name: local_transformer
+    hidden_size: 1024
+    intermediate_size: 4096
+    num_attention_heads: 16
+    num_hidden_layers: 6
+    patch_size: 4
+    pool_type: cls
+    dropout: 0.0
+
+  backbone:
+    name: LFM2
+    model_id: LiquidAI/LFM2.5-350M-Base
+    phone_vocab_size: 64
+    load_pretrained_weights: true
+    freeze_pretrained_body: false
+    weighted_layers: false
+
+  loc_decoder:
+    name: DiT
+    model:
+      dim: 1024
+      out_dim: 64
+      depth: 6
+      heads: 16
+      ff_mult: 4
+      qk_norm: null
+      pe_attn_head: null
+      checkpoint_activations: false
+    random_time: false
+    time_schedule: false
+    history_vae_window_size: 4
+    drop_cond_prob: 0.1
+
+  drop_condition: drop_ctx_or_his
+  stop_predictor_type: transformer
+
+  vocoder:
+    path: ../svae
+
+  loss:
+    use_ar_l1_loss: true
+    use_stop_loss: true
+    use_vae_projected_l1_loss: true
