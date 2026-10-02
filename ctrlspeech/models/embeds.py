@@ -172,6 +172,98 @@ class DurationConditioner(PositiveScalarConditioner):
         )
 
 
+class JapaneseLinguisticConditioner(nn.Module):
+    """Encode phone-aligned Japanese accent and phrase metadata.
+
+    Expected inputs are batched [B, L] values:
+      accent_pitch: 0=unknown, 1=Low, 2=High
+      phrase_boundary: bit0=start, bit1=end
+      accent_nucleus: non-negative NJD nucleus index
+      phrase_mora_count: non-negative mora count
+      valid: whether linguistic conditioning applies to this phone
+    """
+
+    REQUIRED_FIELDS = frozenset(
+        {
+            "accent_pitch",
+            "phrase_boundary",
+            "accent_nucleus",
+            "phrase_mora_count",
+            "valid",
+        }
+    )
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.accent_pitch_embedding = nn.Embedding(3, dim, padding_idx=0)
+        self.phrase_boundary_embedding = nn.Embedding(4, dim, padding_idx=0)
+        self.accent_nucleus_conditioner = PositiveScalarConditioner(
+            dim,
+            hidden_dim=max(64, dim // 8),
+            max_reference=64,
+        )
+        self.phrase_mora_conditioner = PositiveScalarConditioner(
+            dim,
+            hidden_dim=max(64, dim // 8),
+            max_reference=64,
+        )
+        self.zero_padding_embeddings()
+
+    def zero_padding_embeddings(self) -> None:
+        with torch.no_grad():
+            self.accent_pitch_embedding.weight[0].zero_()
+            self.phrase_boundary_embedding.weight[0].zero_()
+
+    def forward(
+        self,
+        features,
+        *,
+        batch_size: int,
+        sequence_length: int,
+    ) -> torch.Tensor:
+        missing = self.REQUIRED_FIELDS.difference(features)
+        if missing:
+            raise ValueError(
+                "linguistic_features is missing: " + ", ".join(sorted(missing))
+            )
+
+        device = self.accent_pitch_embedding.weight.device
+
+        def as_tensor(name, dtype):
+            tensor = torch.as_tensor(features[name], device=device, dtype=dtype)
+            if tensor.shape != (batch_size, sequence_length):
+                raise ValueError(
+                    f"linguistic_features[{name!r}] must have shape "
+                    f"{(batch_size, sequence_length)}, got {tuple(tensor.shape)}"
+                )
+            return tensor
+
+        accent_pitch = as_tensor("accent_pitch", torch.long)
+        boundary = as_tensor("phrase_boundary", torch.long)
+        nucleus = as_tensor("accent_nucleus", torch.float32)
+        mora_count = as_tensor("phrase_mora_count", torch.float32)
+        valid = as_tensor("valid", torch.bool)
+
+        if accent_pitch.numel() and (
+            int(accent_pitch.min().item()) < 0
+            or int(accent_pitch.max().item()) > 2
+        ):
+            raise ValueError("accent_pitch ids must be in 0..2")
+        if boundary.numel() and (
+            int(boundary.min().item()) < 0
+            or int(boundary.max().item()) > 3
+        ):
+            raise ValueError("phrase_boundary ids must be in 0..3")
+
+        out = (
+            self.accent_pitch_embedding(accent_pitch)
+            + self.phrase_boundary_embedding(boundary)
+            + self.accent_nucleus_conditioner(nucleus)
+            + self.phrase_mora_conditioner(mora_count)
+        )
+        return out * valid.unsqueeze(-1).to(out.dtype)
+
+
 class GEGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim=-1)
