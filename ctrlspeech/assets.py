@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_REPO_ID = os.environ.get("CTRLSPEECH_HF_REPO", "zhisheng01/CtrlSpeech")
+DEFAULT_REPO_ID = os.environ.get("CTRLSPEECH_HF_REPO")
 
 
 @dataclass(frozen=True)
@@ -29,37 +29,15 @@ class ModelSpec:
 
 
 MODELS = {
-    spec.key: spec
-    for spec in [
-        ModelSpec(
-            key="control-600m",
-            folder="control-600m",
-            params="692M",
-            controllable=True,
-            description="Pitch / loudness / duration control. The demo default.",
+    "japanese-lfm2-350m": ModelSpec(
+        key="japanese-lfm2-350m",
+        folder="japanese-lfm2-350m",
+        params="LFM2.5-350M backbone",
+        controllable=True,
+        description=(
+            "Japanese CtrlSpeech with pure LiquidAI/LFM2.5-350M-Base backbone."
         ),
-        ModelSpec(
-            key="control-150m",
-            folder="control-150m",
-            params="150M",
-            controllable=True,
-            description="Smaller controllable model for tighter GPU budgets.",
-        ),
-        ModelSpec(
-            key="base-600m",
-            folder="base-600m",
-            params="689M",
-            controllable=False,
-            description="Zero-shot TTS without prosody control (ablation baseline).",
-        ),
-        ModelSpec(
-            key="base-150m",
-            folder="base-150m",
-            params="148M",
-            controllable=False,
-            description="Smaller uncontrolled baseline.",
-        ),
-    ]
+    )
 }
 
 
@@ -121,7 +99,12 @@ def _verify(assets):
     return assets
 
 
-def download_assets(model="control-600m", repo_id=None, revision=None, cache_dir=None):
+def download_assets(
+    model="japanese-lfm2-350m",
+    repo_id=None,
+    revision=None,
+    cache_dir=None,
+):
     """Return local paths for ``model``, downloading from the Hub if needed.
 
     Only the requested model folder plus the shared files are fetched, so
@@ -137,10 +120,18 @@ def download_assets(model="control-600m", repo_id=None, revision=None, cache_dir
     if local_root:
         return _verify(_layout(local_root, spec))
 
+    resolved_repo_id = repo_id or DEFAULT_REPO_ID
+    if not resolved_repo_id:
+        raise RuntimeError(
+            "No public CtrlSpeech-JA checkpoint is configured yet. "
+            "Set CTRLSPEECH_ASSETS to a local trained asset directory or pass "
+            "repo_id / CTRLSPEECH_HF_REPO after publishing a checkpoint."
+        )
+
     from huggingface_hub import snapshot_download
 
     root = snapshot_download(
-        repo_id=repo_id or DEFAULT_REPO_ID,
+        repo_id=resolved_repo_id,
         revision=revision,
         cache_dir=cache_dir,
         allow_patterns=[f"{spec.folder}/*", "svae/*", "shared/*"],
