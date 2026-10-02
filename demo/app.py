@@ -52,7 +52,7 @@ from interactive_plot import WORD_COLORS, interactive_dual_plot_bokeh
 pn.extension(notifications=True, sizing_mode="stretch_width")
 
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
-MODEL_NAME = os.environ.get("CTRLSPEECH_DEMO_MODEL", "control-600m")
+MODEL_NAME = os.environ.get("CTRLSPEECH_DEMO_MODEL", "japanese-lfm2-350m")
 
 DEFAULT_STEPS = 32
 DEFAULT_CFG_STRENGTH = 1.5
