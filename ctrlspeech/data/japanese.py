@@ -228,8 +228,12 @@ def collate_japanese_sequences(
             )
 
     output = {
+        # Dataset-friendly names.
         "input_ids": input_ids,
         "text_mask": text_mask,
+        # Direct DiTar.forward aliases.
+        "text_inputs": input_ids,
+        "text_masks": text_mask,
         "linguistic_features": feature_tensors,
     }
 
@@ -254,5 +258,7 @@ def collate_japanese_sequences(
             native_mask[row, :length] = True
         output["native_text_ids"] = native_ids
         output["native_text_mask"] = native_mask
+        output["native_text_inputs"] = native_ids
+        output["native_text_masks"] = native_mask
 
     return output
