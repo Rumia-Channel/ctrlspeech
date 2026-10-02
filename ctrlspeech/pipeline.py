@@ -79,7 +79,7 @@ def estimate_max_seq_length(target_seconds):
 def tokenize_phones(prompt_phones, target_phones, text_tokenizer):
     """Join prompt and target phones and map them without silent OOV collapse."""
     text_inputs = prompt_phones + " | " + target_phones
-    text_inputs = [re.sub(r"\\d", "", t) for t in text_inputs.split(" ") if t]
+    text_inputs = [re.sub(r"\d", "", t) for t in text_inputs.split(" ") if t]
     unknown = sorted({token for token in text_inputs if token not in text_tokenizer})
     if unknown:
         raise ValueError(
