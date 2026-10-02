@@ -6,6 +6,14 @@
   <a href="https://zhishengzheng.com/ctrlspeech/"><img src="https://img.shields.io/badge/Demo-Samples-1f8acb" alt="Demo"></a>
 </p>
 
+
+> **Japanese development branch:** this branch replaces the upstream Qwen3 AR
+> backbone with the unmodified `LiquidAI/LFM2.5-350M-Base` architecture and
+> uses `pyopenjtalk-plus` for Japanese linguistic/prosody preprocessing.
+> Upstream CtrlSpeech checkpoints are intentionally incompatible. There is no
+> released Japanese LFM2 checkpoint yet; use `main` for the original published
+> models. See [JAPANESE.md](JAPANESE.md) for implementation status.
+
 CtrlSpeech is a zero-shot TTS model you can *steer after the fact*. Generate a
 sentence, read back its pitch contour, loudness contour and phoneme boundaries,
 change one of them, and resynthesise — the model follows the edit and leaves
@@ -33,10 +41,7 @@ recommended; the package requires Python 3.10 or newer.
 
 ```bash
 uv python install 3.11
-uv sync
-
-# Japanese frontend (pyopenjtalk-plus)
-uv sync --extra japanese
+uv sync --extra japanese --group dev
 ```
 
 Use `uv run` for commands so they always execute inside the project
@@ -49,93 +54,80 @@ dependency because its Kaldi runtime is not self-contained through PyPI on all
 platforms. Once an `mfa` executable is available on PATH:
 
 ```bash
-mfa model download acoustic english_us_arpa
-mfa model download dictionary english_us_arpa
+mfa model download acoustic japanese_mfa
+mfa model download dictionary japanese_mfa
+mfa model download g2p japanese_mfa
 ```
 
-For Japanese work, also install the `japanese_mfa` acoustic, dictionary and
-G2P models; see `JAPANESE.md`.
+MFA is only needed for audio/text forced alignment. The canonical Japanese
+linguistic representation comes from pyopenjtalk-plus, not from MFA.
 
-Plain synthesis from a pre-aligned annotation works without MFA.
-
-Weights download automatically from the Hub on first use (~3.5 GB for one
-model). To point at a local copy instead, set `CTRLSPEECH_ASSETS` to a directory
-laid out like the Hub repo.
+There is no public Japanese checkpoint yet. For locally trained assets, set
+`CTRLSPEECH_ASSETS`; after publishing a checkpoint, set
+`CTRLSPEECH_HF_REPO` or pass `repo_id`.
 
 ---
 
-## Quick start
+## Development quick start
 
-### Python
+Inspect Japanese text and phone-aligned accent features:
 
 ```python
-from ctrlspeech import CtrlSpeech, shift_pitch_semitones
+from ctrlspeech.frontend import JapaneseFrontend
 
-tts = CtrlSpeech.from_pretrained("control-600m")
+frontend = JapaneseFrontend()
+result = frontend.analyze("今日は良い天気ですね。")
 
-# Adopt a real recording as the baseline — no first synthesis needed.
-baseline = tts.from_audio("clip.wav", "If you dream a thing more than once, "
-                                      "it's sure to come true.")
-
-# Raise the pitch by 5 semitones; loudness and timing come from the clip.
-result = tts.regenerate(baseline, pitch=shift_pitch_semitones(baseline.gen_f0, 5))
-result.save("higher.wav")
+print(result.phone_string)
+for feature in result.phone_features:
+    print(
+        feature.phone,
+        feature.pitch,
+        feature.accent_phrase_index,
+        feature.accent_nucleus,
+        feature.phrase_mora_count,
+    )
 ```
 
-### Command line
+Build the exact prompt/target sequence consumed by the LFM2 AR backbone:
+
+```python
+from ctrlspeech.data import (
+    collate_japanese_sequences,
+    encode_japanese_text,
+    join_prompt_target,
+)
+
+prompt = encode_japanese_text("これは参照音声です。")
+target = encode_japanese_text("今日は良い天気ですね。")
+sequence = join_prompt_target(prompt, target)
+batch = collate_japanese_sequences([sequence])
+
+print(batch["input_ids"].shape)
+print(batch["linguistic_features"]["accent_pitch"].shape)
+```
+
+Run the current test suite:
 
 ```bash
-# Raise pitch, keep everything else
-uv run ctrlspeech --audio clip.wav --transcript-text "..." --pitch-shift 5 --out out.wav
-
-# Stretch one word to 2x, then verify the result with MFA
-uv run ctrlspeech --audio clip.wav --transcript-text "..." \
-    --stretch-word dreams --stretch-ratio 2 --out out.wav
-
-# Full two-pass synthesis: prompt supplies the voice, the target recording
-# supplies reference timing for its own text
-uv run ctrlspeech --prompt-wav demo/assets/dreams-prompt.wav --prompt-text demo/assets/dreams-prompt.txt \
-    --target-wav demo/assets/dreams-target.wav --target-text demo/assets/dreams-target.txt \
-    --loudness-shift 8 --out out.wav
+uv run pytest
 ```
 
-From a checkout, use `uv run python scripts/generate.py` if you prefer the script entry point.
-
-### Interactive demo
-
-```bash
-uv run panel serve demo/app.py --show --port 5006
-```
-
-Over SSH, forward the port from your laptop (`ssh -L 5006:localhost:5006 host`)
-and start the server with `--allow-websocket-origin=localhost:5006`, then open
-<http://localhost:5006/app>.
-
-The demo lets you draw pitch and loudness contours freehand, drag word
-boundaries, and compare *baseline vs. requested vs. achieved* after
-regenerating. Drawing is a three-step cycle: **Draw** arms the gesture,
-you draw, **Finish** locks the contour in. Before Draw (and after Finish),
-dragging pans the plot.
-
-`panel serve` does not hot-reload imported modules — restart it after editing
-`ctrlspeech/` or `demo/interactive_plot.py`.
+The Panel/demo inference path requires a trained
+`japanese-lfm2-350m` checkpoint and intentionally does not fall back to the
+upstream Qwen checkpoints.
 
 ---
 
 ## Models
 
-| Model | Params | Prosody control | Notes |
-|---|---|---|---|
-| `control-600m` | 692 M | pitch · loudness · duration | Default; used by the demo |
-| `control-150m` | 150 M | pitch · loudness · duration | For tighter GPU budgets |
-| `base-600m` | 689 M | — | Zero-shot TTS ablation baseline |
-| `base-150m` | 148 M | — | Smaller ablation baseline |
+| Model | Backbone | Status |
+|---|---|---|
+| `japanese-lfm2-350m` | LFM2.5-350M Base, 10 LIV Conv + 6 GQA | architecture implemented; checkpoint not yet released |
 
-The `base-*` checkpoints never learned the prosody embeddings; asking them for a
-control edit raises an error rather than silently ignoring it.
-
-All four sit in one Hub repo alongside the shared SVAE vocoder, CAM++ speaker
-encoder and phoneme vocabulary. Only the model you ask for is downloaded.
+The `japanese` branch rejects upstream Qwen checkpoints rather than loading
+them partially. The LFM2 body is loaded from pretrained weights for training;
+a finished CtrlSpeech-JA checkpoint contains the complete fine-tuned body.
 
 ---
 
@@ -146,9 +138,13 @@ Audio is analysed at **100 frames per second** (16 kHz, hop 160).
 - **Pitch** — F0 mapped to 128 mel-spaced bins; bin 0 means unvoiced. Slider
   shifts skip unvoiced frames so silence is not given a pitch.
 - **Loudness** — A-weighted dB in 64 bins, about 1.05 bins per dB.
-- **Duration** — per-phoneme frame counts. `duration_embedding` has 192 entries,
-  so one phoneme spans at most **191 frames (1.91 s)**; an edited timeline is
-  capped at **2001 frames (20 s)**. Both limits live in `ctrlspeech/retime.py`.
+- **Duration** — per-phone frame counts are log-compressed by a continuous MLP
+  conditioner; there is no 192-entry lookup-table ceiling.
+- **Japanese linguistic accent** — pyopenjtalk-plus Low/High, accent-phrase
+  boundaries, accent nucleus and phrase mora count are separate conditions from
+  measured/edited F0.
+- **Long form** — the current safety target is **60 s** / 6001 control frames,
+  with at most 620 AR steps.
 
 Stretching a word rescales its phoneme boundaries uniformly and shifts
 everything after it, so inter-word pauses keep their original length.
@@ -168,7 +164,7 @@ truncated.
 | `CTRLSPEECH_HF_REPO` | Override the Hub repo id |
 | `CTRLSPEECH_MFA_CACHE` | Where MFA scratch files go (default `~/.cache/ctrlspeech/mfa`) |
 | `CTRLSPEECH_MFA_DICT` | Path to `english_us_arpa.dict` |
-| `CTRLSPEECH_DEMO_MODEL` | Which model the demo loads (default `control-600m`) |
+| `CTRLSPEECH_DEMO_MODEL` | Which model the demo loads (default `japanese-lfm2-350m`) |
 
 MFA alignment uses a **sentence-level mini dictionary** built on the fly, and
 falls back to the full 200k-word lexicon only when a word is out of vocabulary.
