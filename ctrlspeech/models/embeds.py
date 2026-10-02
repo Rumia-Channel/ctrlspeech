@@ -149,9 +149,10 @@ class PositiveScalarConditioner(nn.Module):
             nn.LayerNorm(dim),
         )
 
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
-        frames = frames.to(dtype=torch.float32).clamp_min(0)
-        scaled = torch.log1p(frames) / self.log_reference
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        dtype = self.net[0].weight.dtype
+        values = values.to(dtype=dtype).clamp_min(0)
+        scaled = torch.log1p(values) / self.log_reference
         return self.net(scaled.unsqueeze(-1))
 
 
