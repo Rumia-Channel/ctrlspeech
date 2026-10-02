@@ -134,6 +134,33 @@ class TextEmbedding(nn.Module):
         return text_emb
 
 
+class DurationConditioner(nn.Module):
+    """Embed non-negative duration frames without a fixed lookup-table limit.
+
+    Durations are log-compressed before an MLP so common phone durations retain
+    resolution while long pauses remain representable.  The optional
+    max_reference_frames only normalizes the numeric range; values above it are
+    still accepted.
+    """
+
+    def __init__(self, dim: int, hidden_dim: int = 256, max_reference_frames: int = 6000):
+        super().__init__()
+        if max_reference_frames < 1:
+            raise ValueError("max_reference_frames must be positive")
+        self.log_reference = math.log1p(float(max_reference_frames))
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim),
+            nn.LayerNorm(dim),
+        )
+
+    def forward(self, frames: torch.Tensor) -> torch.Tensor:
+        frames = frames.to(dtype=torch.float32).clamp_min(0)
+        scaled = torch.log1p(frames) / self.log_reference
+        return self.net(scaled.unsqueeze(-1))
+
+
 class GEGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim=-1)
