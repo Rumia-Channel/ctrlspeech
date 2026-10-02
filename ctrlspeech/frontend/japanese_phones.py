@@ -45,6 +45,7 @@ OPENJTALK_PHONES: Final[tuple[str, ...]] = (
     "pau",
     "sil",
     "sp",
+    "unk",
 )
 
 JAPANESE_PHONE_TOKENS: Final[tuple[str, ...]] = (
