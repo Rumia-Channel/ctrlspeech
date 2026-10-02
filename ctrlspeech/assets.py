@@ -2,10 +2,7 @@
 
 Everything is fetched from one Hugging Face repo, laid out as::
 
-    control-600m/{config.yaml, model.safetensors, qwen_config.json}
-    control-150m/{config.yaml, model.safetensors, qwen_config.json}
-    base-600m/...
-    base-150m/...
+    <model>/{config.yaml, model.safetensors}
     svae/{metainfo.json, config.json, dac/{ema_state_dict.pth, weights.pth}}
     shared/{vocab.json, campplus.onnx}
 
@@ -74,7 +71,6 @@ class Assets:
     root: Path
     config_path: Path
     weights_path: Path
-    qwen_config_path: Path
     svae_dir: Path
     vocab_path: Path
     campplus_path: Path
@@ -99,7 +95,6 @@ def _layout(root, spec):
         root=root,
         config_path=folder / "config.yaml",
         weights_path=weights,
-        qwen_config_path=folder / "qwen_config.json",
         svae_dir=root / "svae",
         vocab_path=root / "shared" / "vocab.json",
         campplus_path=root / "shared" / "campplus.onnx",
@@ -112,7 +107,6 @@ def _verify(assets):
         for path in (
             assets.config_path,
             assets.weights_path,
-            assets.qwen_config_path,
             assets.svae_dir / "metainfo.json",
             assets.vocab_path,
             assets.campplus_path,
