@@ -173,6 +173,8 @@ class DiTar(nn.Module):
         text_inputs, text_masks=None, duration_segments=None, 
         pitch=None, loudness=None, stresses=None, emotions=None,
         linguistic_features=None,
+        native_text_inputs=None,
+        native_text_masks=None,
     ):
         device = self.device
         with torch.no_grad():
@@ -198,6 +200,8 @@ class DiTar(nn.Module):
             pitch=pitch,
             loudness=loudness,
             linguistic_features=linguistic_features,
+            native_text_inputs=native_text_inputs,
+            native_text_masks=native_text_masks,
         )
 
         ar_padding_mask = torch.cat([text_masks, vae_aggregated_masks], dim=1)
@@ -380,6 +384,8 @@ class DiTar(nn.Module):
         self, vae_features, vae_padding_masks, speaker_embs, text_inputs, text_masks,
         duration_segments=None, pitch=None, loudness=None,
         linguistic_features=None,
+        native_text_inputs=None,
+        native_text_masks=None,
     ):
         text_embeds = self.causalAR.embed_phone_tokens(text_inputs)
 
@@ -435,22 +441,23 @@ class DiTar(nn.Module):
                 padding_mask=padded_vae_padding_masks
             )
 
+        text_embeds, text_masks, text_modality_ids = (
+            self.causalAR.compose_text_prefix(
+                phone_embeds=text_embeds,
+                phone_mask=text_masks,
+                native_text_ids=native_text_inputs,
+                native_text_mask=native_text_masks,
+            )
+        )
+        audio_modality_ids = torch.full(
+            vae_aggregated.shape[:-1],
+            self.causalAR.AUDIO_MODALITY,
+            device=self.device,
+            dtype=torch.int64,
+        )
         input_embeds = torch.cat([text_embeds, vae_aggregated], dim=1)
         modality_type_ids = torch.cat(
-            [
-                torch.full(
-                    text_embeds.shape[:-1],
-                    self.causalAR.PHONE_MODALITY,
-                    device=self.device,
-                    dtype=torch.int64,
-                ),
-                torch.full(
-                    vae_aggregated.shape[:-1],
-                    self.causalAR.AUDIO_MODALITY,
-                    device=self.device,
-                    dtype=torch.int64,
-                ),
-            ],
+            [text_modality_ids, audio_modality_ids],
             dim=1,
         )
 
@@ -580,6 +587,8 @@ class DiTar(nn.Module):
         pitch=None,
         loudness=None,
         linguistic_features=None,
+        native_text_inputs=None,
+        native_text_masks=None,
         max_seq_length: int = 300,
         steps: int = 32,
         cfg_strength: float = 1.5,
@@ -668,6 +677,8 @@ class DiTar(nn.Module):
             pitch=pitch,
             loudness=loudness,
             linguistic_features=linguistic_features,
+            native_text_inputs=native_text_inputs,
+            native_text_masks=native_text_masks,
         )
 
         ar_padding_mask = torch.cat([text_masks, vae_aggregated_masks], dim=1)
