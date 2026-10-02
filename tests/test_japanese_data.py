@@ -1,5 +1,6 @@
 from ctrlspeech.data import (
     collate_japanese_sequences,
+    encode_japanese_pair,
     encode_japanese_text,
     join_prompt_target,
 )
@@ -55,3 +56,39 @@ def test_japanese_sequence_encoding_and_collation():
     assert batch["input_ids"].shape == (1, 8)
     assert batch["text_mask"].all()
     assert batch["linguistic_features"]["accent_pitch"].shape == (1, 8)
+
+
+class FakeNativeTokenizer:
+    def __call__(
+        self,
+        text,
+        *,
+        add_special_tokens=True,
+        return_attention_mask=False,
+    ):
+        assert text == "猫\n犬"
+        assert add_special_tokens is True
+        assert return_attention_mask is False
+        return {"input_ids": [1, 10, 11, 7]}
+
+
+def test_japanese_pair_includes_native_lfm_text_prefix():
+    backend = FakePlus(
+        {
+            "猫": [_entry("猫", ["n", "e", "k", "o"], accent=1, mora=2)],
+            "犬": [_entry("犬", ["i", "n", "u"], accent=2, mora=2)],
+        }
+    )
+    frontend = JapaneseFrontend(backend=backend)
+
+    sequence = encode_japanese_pair(
+        "猫",
+        "犬",
+        frontend=frontend,
+        native_tokenizer=FakeNativeTokenizer(),
+    )
+    assert sequence.native_text_ids == (1, 10, 11, 7)
+
+    batch = collate_japanese_sequences([sequence])
+    assert batch["native_text_ids"].tolist() == [[1, 10, 11, 7]]
+    assert batch["native_text_mask"].tolist() == [[True, True, True, True]]
