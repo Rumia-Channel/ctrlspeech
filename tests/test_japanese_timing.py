@@ -21,5 +21,6 @@ def test_one_minute_generation_limits_are_consistent():
     assert MAX_TARGET_SECONDS == 60
     assert MAX_TIMELINE_FRAMES == 6001
     assert MAX_DURATION_FRAMES == 6000
+    assert MAX_AR_STEPS == 600
     assert estimate_max_seq_length(60) == MAX_AR_STEPS
-    assert MAX_AR_STEPS > 400
+    assert estimate_max_seq_length(120) == MAX_AR_STEPS
