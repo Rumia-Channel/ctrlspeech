@@ -20,9 +20,6 @@ import torchaudio
 
 from x_transformers.x_transformers import apply_rotary_pos_emb
 
-from ..backbone.qwen3 import Qwen3Model, Qwen3Config
-
-
 # raw wav to mel spec
 mel_basis_cache = {}
 hann_window_cache = {}
@@ -1097,6 +1094,14 @@ class DownsampleBlock(nn.Module):
 
 
 class StopPredictor(nn.Module):
+    """Small causal Transformer stop head with no external LM dependency.
+
+    This module is kept for experimentation; the current Japanese LFM2 config
+    uses MLPStopPredictor. When cache mode is requested we retain prior hidden
+    states as the stop head's compact history and return logits only for the
+    newly supplied positions.
+    """
+
     def __init__(
         self,
         dim: int,
@@ -1107,34 +1112,57 @@ class StopPredictor(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        config = Qwen3Config(
-            hidden_size = dim,
-            intermediate_size = dim_feedfwd,
-            num_hidden_layers = num_layers,
-            num_attention_heads = nhead,
-            num_key_value_heads=1,
+        layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=nhead,
+            dim_feedforward=dim_feedfwd,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
         )
-        self.model = Qwen3Model(config)
-        del self.model.embed_tokens
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
         self.proj = nn.Linear(dim, output_dim)
 
     def forward(
         self,
-        x: torch.Tensor,                      # (B, T, D)
-        src_key_padding_mask: Optional[torch.Tensor] = None, # (B, T)
+        x: torch.Tensor,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[tuple] = None,
         use_cache: Optional[bool] = None,
-    ) -> torch.Tensor:                        # (B, T) or (B, T), past_key_values
-        outputs = self.model(
-            inputs_embeds=x, 
-            attention_mask=src_key_padding_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
+    ):
+        new_length = x.shape[1]
+        history = None
+        if past_key_values:
+            history = past_key_values[0]
+            x = torch.cat([history, x], dim=1)
+
+        seq_len = x.shape[1]
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(
+            seq_len,
+            device=x.device,
         )
-        logits = self.proj(outputs.last_hidden_state).squeeze(-1)
-        
+
+        padding_mask = None
+        if src_key_padding_mask is not None:
+            src_key_padding_mask = src_key_padding_mask.to(
+                device=x.device,
+                dtype=torch.bool,
+            )
+            if src_key_padding_mask.shape[1] == seq_len:
+                padding_mask = ~src_key_padding_mask
+            elif history is None and src_key_padding_mask.shape[1] == new_length:
+                padding_mask = ~src_key_padding_mask
+
+        hidden = self.encoder(
+            x,
+            mask=causal_mask,
+            src_key_padding_mask=padding_mask,
+        )
+        logits = self.proj(hidden)
         if use_cache:
-            return logits, outputs.past_key_values
+            cache = (x.detach(),)
+            return logits[:, -new_length:], cache
         return logits, None
 
 
