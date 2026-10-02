@@ -182,6 +182,63 @@ class LFM2SpeechBackbone(nn.Module):
         """Freeze or unfreeze only the pretrained LFM body."""
         for parameter in self.model.parameters():
             parameter.requires_grad = bool(trainable)
+    def compose_text_prefix(
+        self,
+        *,
+        phone_embeds: torch.Tensor,
+        phone_mask: torch.Tensor,
+        native_text_ids: torch.Tensor | None = None,
+        native_text_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compose optional native LFM text followed by speech phone tokens.
+
+        Native text preserves useful Japanese representations from LFM2.5
+        pretraining, while phone embeddings remain the authoritative
+        pronunciation/prosody stream. Returned modality IDs are added only
+        when the composed prefix enters the LFM body.
+        """
+        if phone_embeds.ndim != 3:
+            raise ValueError("phone_embeds must have shape [B, L, D]")
+        if phone_mask.shape != phone_embeds.shape[:2]:
+            raise ValueError("phone_mask must match phone_embeds [B, L]")
+
+        batch, phone_length = phone_mask.shape
+        phone_modality = torch.full(
+            (batch, phone_length),
+            self.PHONE_MODALITY,
+            dtype=torch.long,
+            device=phone_embeds.device,
+        )
+
+        if native_text_ids is None:
+            return phone_embeds, phone_mask, phone_modality
+
+        if native_text_ids.ndim != 2 or native_text_ids.shape[0] != batch:
+            raise ValueError("native_text_ids must have shape [B, L_native]")
+        native_text_ids = native_text_ids.to(phone_embeds.device)
+        native_embeds = self.embed_native_tokens(native_text_ids)
+        if native_text_mask is None:
+            native_text_mask = native_text_ids.ne(
+                int(getattr(self.model.config, "pad_token_id", 0) or 0)
+            )
+        else:
+            native_text_mask = native_text_mask.to(
+                device=phone_embeds.device, dtype=torch.bool
+            )
+        if native_text_mask.shape != native_text_ids.shape:
+            raise ValueError("native_text_mask must match native_text_ids")
+
+        native_modality = torch.full(
+            native_text_ids.shape,
+            self.NATIVE_TEXT_MODALITY,
+            dtype=torch.long,
+            device=phone_embeds.device,
+        )
+        return (
+            torch.cat([native_embeds.to(phone_embeds.dtype), phone_embeds], dim=1),
+            torch.cat([native_text_mask, phone_mask], dim=1),
+            torch.cat([native_modality, phone_modality], dim=1),
+        )
 
     def _add_modality(
         self,
