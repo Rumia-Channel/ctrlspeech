@@ -29,6 +29,8 @@ dependencies = [
     "librosa>=0.10",
     "soundfile>=0.12",
     "pyworld>=0.3.4",
+    # pyworld 0.3.x still imports pkg_resources at runtime.
+    "setuptools>=68,<81",
     # LFM2.5 support and cache semantics are pinned for reproducibility.
     "transformers==5.17.0",
     "einops>=0.7",
