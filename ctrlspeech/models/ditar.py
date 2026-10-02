@@ -652,6 +652,7 @@ class DiTar(nn.Module):
         duration_segments=None,
         pitch=None,
         loudness=None,
+        linguistic_features=None,
         max_seq_length: int = 300,
         steps: int = 32,
         cfg_strength: float = 1.5,
@@ -739,6 +740,7 @@ class DiTar(nn.Module):
             duration_segments=duration_segments,
             pitch=pitch,
             loudness=loudness,
+            linguistic_features=linguistic_features,
         )
 
         ar_padding_mask = torch.cat([text_masks, vae_aggregated_masks], dim=1)
