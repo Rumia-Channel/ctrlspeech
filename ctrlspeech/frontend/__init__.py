@@ -4,12 +4,14 @@ from .japanese import (
     JapaneseFrontend,
     JapaneseFrontendResult,
     JapaneseMorpheme,
+    JapanesePhoneFeature,
 )
 
 __all__ = [
     "JapaneseFrontend",
     "JapaneseFrontendResult",
     "JapaneseMorpheme",
+    "JapanesePhoneFeature",
 ]
 
 
