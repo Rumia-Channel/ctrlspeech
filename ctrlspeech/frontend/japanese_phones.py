@@ -53,7 +53,7 @@ JAPANESE_PHONE_TOKENS: Final[tuple[str, ...]] = (
 JAPANESE_PHONE_TO_ID: Final[dict[str, int]] = {
     token: index for index, token in enumerate(JAPANESE_PHONE_TOKENS)
 }
-JAPANESE_PHONE_VOCAB_SIZE: Final[int] = 64
+JAPANESE_PHONE_VOCAB_SIZE: Final[int] = len(JAPANESE_PHONE_TOKENS)
 
 
 def validate_japanese_phones(
