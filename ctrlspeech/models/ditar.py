@@ -12,7 +12,7 @@ import torch.nn.utils.rnn as rnn
 from einops import rearrange, repeat
 from torchdiffeq import odeint
 
-from .embeds import DurationConditioner, TimestepEmbedding, VAEProjector
+from .embeds import DurationConditioner, PositiveScalarConditioner, TimestepEmbedding, VAEProjector
 from .backbone import DEFAULT_LFM2_MODEL_ID, LFM2SpeechBackbone
 from .modules import AggregationEncoder, StopPredictor, MLPStopPredictor
 from .backbone.dit import DiT
@@ -142,6 +142,26 @@ class DiTar(nn.Module):
             max_reference_frames=6000,
         )
 
+        # Japanese linguistic accent is distinct from measured/edited F0.
+        # ID 0 means unavailable/none, 1=Low, 2=High.
+        self.accent_pitch_embedding = nn.Embedding(
+            3, self.dim, padding_idx=0
+        )
+        # Boundary is a 2-bit field: bit0=start, bit1=end.
+        self.phrase_boundary_embedding = nn.Embedding(
+            4, self.dim, padding_idx=0
+        )
+        self.accent_nucleus_conditioner = PositiveScalarConditioner(
+            self.dim,
+            hidden_dim=max(64, self.dim // 8),
+            max_reference=64,
+        )
+        self.phrase_mora_conditioner = PositiveScalarConditioner(
+            self.dim,
+            hidden_dim=max(64, self.dim // 8),
+            max_reference=64,
+        )
+
         # Preserve pretrained LFM2 and SVAE weights.  Only CtrlSpeech-specific
         # modules are initialized here; a future checkpoint will overwrite them
         # during inference as usual.
@@ -149,6 +169,10 @@ class DiTar(nn.Module):
             if name in {"causalAR", "generator"}:
                 continue
             module.apply(self._init_weights)
+
+        with torch.no_grad():
+            self.accent_pitch_embedding.weight[0].zero_()
+            self.phrase_boundary_embedding.weight[0].zero_()
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -165,7 +189,8 @@ class DiTar(nn.Module):
     def forward(
         self, raw_audio, audio_lengths, speaker_embs, 
         text_inputs, text_masks=None, duration_segments=None, 
-        pitch=None, loudness=None, stresses=None, emotions=None
+        pitch=None, loudness=None, stresses=None, emotions=None,
+        linguistic_features=None,
     ):
         device = self.device
         with torch.no_grad():
@@ -190,7 +215,7 @@ class DiTar(nn.Module):
             duration_segments=duration_segments,
             pitch=pitch,
             loudness=loudness,
-            stresses=stresses,
+            linguistic_features=linguistic_features,
         )
 
         ar_padding_mask = torch.cat([text_masks, vae_aggregated_masks], dim=1)
@@ -369,11 +394,77 @@ class DiTar(nn.Module):
             duration_embeds.append(duration_embed)
         return pitch_embeds, loudness_embeds, duration_embeds
 
+    def get_japanese_linguistic_embed(
+        self,
+        linguistic_features,
+        *,
+        batch_size: int,
+        sequence_length: int,
+    ):
+        """Encode phone-aligned OpenJTalk accent features.
+
+        Expected fields are accent_pitch (0/1/2), phrase_boundary (0..3),
+        accent_nucleus, phrase_mora_count and valid. Each field must have
+        shape [B, L] and L must match the phone token sequence, including any
+        explicit separator token supplied by the caller.
+        """
+        required = {
+            "accent_pitch",
+            "phrase_boundary",
+            "accent_nucleus",
+            "phrase_mora_count",
+            "valid",
+        }
+        missing = required.difference(linguistic_features)
+        if missing:
+            raise ValueError(
+                "linguistic_features is missing: " + ", ".join(sorted(missing))
+            )
+
+        def as_tensor(name, dtype):
+            value = linguistic_features[name]
+            tensor = torch.as_tensor(value, device=self.device, dtype=dtype)
+            if tensor.shape != (batch_size, sequence_length):
+                raise ValueError(
+                    f"linguistic_features[{name!r}] must have shape "
+                    f"{(batch_size, sequence_length)}, got {tuple(tensor.shape)}"
+                )
+            return tensor
+
+        accent_pitch = as_tensor("accent_pitch", torch.long)
+        boundary = as_tensor("phrase_boundary", torch.long)
+        nucleus = as_tensor("accent_nucleus", torch.float32)
+        mora_count = as_tensor("phrase_mora_count", torch.float32)
+        valid = as_tensor("valid", torch.bool)
+
+        if accent_pitch.numel() and (
+            accent_pitch.min() < 0 or accent_pitch.max() > 2
+        ):
+            raise ValueError("accent_pitch ids must be in 0..2")
+        if boundary.numel() and (boundary.min() < 0 or boundary.max() > 3):
+            raise ValueError("phrase_boundary ids must be in 0..3")
+
+        out = (
+            self.accent_pitch_embedding(accent_pitch)
+            + self.phrase_boundary_embedding(boundary)
+            + self.accent_nucleus_conditioner(nucleus)
+            + self.phrase_mora_conditioner(mora_count)
+        )
+        return out * valid.unsqueeze(-1).to(out.dtype)
+
     def get_ar_input(
-        self, vae_features, vae_padding_masks, speaker_embs, text_inputs, text_masks, 
-        duration_segments=None, pitch=None, loudness=None
+        self, vae_features, vae_padding_masks, speaker_embs, text_inputs, text_masks,
+        duration_segments=None, pitch=None, loudness=None,
+        linguistic_features=None,
     ):
         text_embeds = self.causalAR.embed_phone_tokens(text_inputs)
+
+        if linguistic_features is not None:
+            text_embeds = text_embeds + self.get_japanese_linguistic_embed(
+                linguistic_features,
+                batch_size=text_embeds.shape[0],
+                sequence_length=text_embeds.shape[1],
+            ).to(text_embeds.dtype)
 
         if duration_segments is not None and pitch is not None and loudness is not None:
             pitch_embeds, loudness_embeds, duration_embeds = self.get_pitch_loudness_embed(
