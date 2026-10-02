@@ -77,10 +77,15 @@ def estimate_max_seq_length(target_seconds):
 
 
 def tokenize_phones(prompt_phones, target_phones, text_tokenizer):
-    """Join prompt and target phones with ``|`` and map them to token ids."""
+    """Join prompt and target phones and map them without silent OOV collapse."""
     text_inputs = prompt_phones + " | " + target_phones
-    text_inputs = [re.sub(r"\d", "", t) for t in text_inputs.split(" ")]
-    input_ids = torch.LongTensor([text_tokenizer.get(t, 1) for t in text_inputs])
+    text_inputs = [re.sub(r"\\d", "", t) for t in text_inputs.split(" ") if t]
+    unknown = sorted({token for token in text_inputs if token not in text_tokenizer})
+    if unknown:
+        raise ValueError(
+            "Phone vocabulary is missing token(s): " + ", ".join(unknown)
+        )
+    input_ids = torch.LongTensor([text_tokenizer[token] for token in text_inputs])
     input_ids = input_ids.unsqueeze(0)
     return input_ids, input_ids != 0
 
