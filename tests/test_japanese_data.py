@@ -92,3 +92,7 @@ def test_japanese_pair_includes_native_lfm_text_prefix():
     batch = collate_japanese_sequences([sequence])
     assert batch["native_text_ids"].tolist() == [[1, 10, 11, 7]]
     assert batch["native_text_mask"].tolist() == [[True, True, True, True]]
+    assert batch["native_text_inputs"] is batch["native_text_ids"]
+    assert batch["native_text_masks"] is batch["native_text_mask"]
+    assert batch["text_inputs"] is batch["input_ids"]
+    assert batch["text_masks"] is batch["text_mask"]
