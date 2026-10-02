@@ -348,15 +348,18 @@ class DiTar(nn.Module):
 
         out = []
         for start, end in segments:
-            if start >= n_frame:
-                # No pitch/loudness data for this segment -> add nothing.
+            # (0, 0) is the canonical "conditioning unavailable" sentinel used
+            # by separators and unconstrained phones. It must contribute exactly
+            # zero rather than accidentally sampling frame 0.
+            if end <= start or start >= n_frame:
+                out.append(zero)
+                continue
+
+            e = min(end, n_frame)  # clamp to available frames
+            if e <= start:
                 out.append(zero)
             else:
-                e = min(end, n_frame)  # clamp to available frames
-                if start != e:
-                    out.append(frame_embed[start:e].mean(dim=0))
-                else:
-                    out.append(frame_embed[start])
+                out.append(frame_embed[start:e].mean(dim=0))
         return torch.stack(out, dim=0)
 
     def get_pitch_loudness_embed(self, pitch, loudness, segment):
@@ -372,11 +375,19 @@ class DiTar(nn.Module):
             loudness_embeds.append(self._aggregate_segment_embed(loudness_embed, s))
 
             duration = torch.tensor(
-                [end - start if start != end else 0 for start, end in s],
+                [max(0, end - start) for start, end in s],
                 device=self.device,
                 dtype=torch.float32,
             )
+            duration_valid = torch.tensor(
+                [end > start for start, end in s],
+                device=self.device,
+                dtype=torch.bool,
+            )
             duration_embed = self.duration_conditioner(duration)
+            duration_embed = duration_embed * duration_valid.unsqueeze(-1).to(
+                duration_embed.dtype
+            )
             duration_embeds.append(duration_embed)
         return pitch_embeds, loudness_embeds, duration_embeds
 
