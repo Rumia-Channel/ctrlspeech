@@ -56,7 +56,9 @@ DEFAULT_STEPS = 32
 DEFAULT_CFG_STRENGTH = 1.5
 TRIM_TOP_DB = 40
 AR_STOP_MARGIN_STEPS = 20
-MAX_AR_STEPS = int(np.ceil(MAX_TARGET_SECONDS / AR_STEP_SECONDS)) + AR_STOP_MARGIN_STEPS
+# Hard one-minute generation ceiling. Stop-margin logic below may use spare
+# steps for shorter utterances, but it must never extend the target past 60 s.
+MAX_AR_STEPS = int(np.ceil(MAX_TARGET_SECONDS / AR_STEP_SECONDS))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
