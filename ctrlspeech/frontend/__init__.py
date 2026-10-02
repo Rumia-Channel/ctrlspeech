@@ -5,6 +5,7 @@ from .japanese import (
     JapaneseFrontendResult,
     JapaneseMorpheme,
     JapanesePhoneFeature,
+    join_linguistic_features,
 )
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "JapaneseFrontendResult",
     "JapaneseMorpheme",
     "JapanesePhoneFeature",
+    "join_linguistic_features",
 ]
 
 
