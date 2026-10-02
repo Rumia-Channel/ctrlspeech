@@ -218,7 +218,7 @@ class CtrlSpeech:
 
     # -- construction ----------------------------------------------------
     @classmethod
-    def from_pretrained(cls, model="control-600m", device=None, repo_id=None,
+    def from_pretrained(cls, model="japanese-lfm2-350m", device=None, repo_id=None,
                         revision=None, aligner=None, progress=False):
         assets = download_assets(model=model, repo_id=repo_id, revision=revision)
         return cls.from_assets(
