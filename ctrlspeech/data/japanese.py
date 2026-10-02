@@ -40,6 +40,7 @@ class JapaneseSequenceEncoding:
     target: JapaneseTextEncoding
     phone_ids: tuple[int, ...]
     linguistic_features: dict[str, tuple]
+    native_text_ids: tuple[int, ...] = ()
 
     def __post_init__(self):
         length = len(self.phone_ids)
@@ -121,6 +122,65 @@ def join_prompt_target(
     )
 
 
+def encode_japanese_pair(
+    prompt_text: str,
+    target_text: str,
+    *,
+    frontend: JapaneseFrontend | None = None,
+    phone_vocab: Mapping[str, int] | None = None,
+    native_tokenizer=None,
+    run_marine: bool = False,
+) -> JapaneseSequenceEncoding:
+    """Encode a Japanese prompt/target pair for the dual LFM2 text prefix.
+
+    The phone stream is authoritative for pronunciation and accent control.
+    When a native LFM tokenizer is supplied, the normalized raw Japanese pair
+    is also tokenized as a semantic prefix so LFM2.5 can retain useful language
+    representations from pretraining.
+    """
+    frontend = frontend or JapaneseFrontend()
+    prompt = encode_japanese_text(
+        prompt_text,
+        frontend=frontend,
+        phone_vocab=phone_vocab,
+        run_marine=run_marine,
+    )
+    target = encode_japanese_text(
+        target_text,
+        frontend=frontend,
+        phone_vocab=phone_vocab,
+        run_marine=run_marine,
+    )
+    sequence = join_prompt_target(
+        prompt,
+        target,
+        phone_vocab=phone_vocab,
+    )
+
+    if native_tokenizer is None:
+        return sequence
+
+    raw_pair = prompt.result.normalized_text + "\n" + target.result.normalized_text
+    encoded = native_tokenizer(
+        raw_pair,
+        add_special_tokens=True,
+        return_attention_mask=False,
+    )
+    native_ids = encoded["input_ids"]
+    if native_ids and isinstance(native_ids[0], list):
+        if len(native_ids) != 1:
+            raise ValueError("native tokenizer returned an unexpected batch")
+        native_ids = native_ids[0]
+
+    return JapaneseSequenceEncoding(
+        prompt=sequence.prompt,
+        target=sequence.target,
+        phone_ids=sequence.phone_ids,
+        linguistic_features=sequence.linguistic_features,
+        native_text_ids=tuple(int(token_id) for token_id in native_ids),
+    )
+
+
 def collate_japanese_sequences(
     sequences: list[JapaneseSequenceEncoding],
     *,
@@ -167,8 +227,32 @@ def collate_japanese_sequences(
                 dtype=target.dtype,
             )
 
-    return {
+    output = {
         "input_ids": input_ids,
         "text_mask": text_mask,
         "linguistic_features": feature_tensors,
     }
+
+    native_max_length = max(len(sequence.native_text_ids) for sequence in sequences)
+    if native_max_length:
+        native_ids = torch.zeros(
+            (batch, native_max_length),
+            dtype=torch.long,
+        )
+        native_mask = torch.zeros(
+            (batch, native_max_length),
+            dtype=torch.bool,
+        )
+        for row, sequence in enumerate(sequences):
+            length = len(sequence.native_text_ids)
+            if not length:
+                continue
+            native_ids[row, :length] = torch.tensor(
+                sequence.native_text_ids,
+                dtype=torch.long,
+            )
+            native_mask[row, :length] = True
+        output["native_text_ids"] = native_ids
+        output["native_text_mask"] = native_mask
+
+    return output
