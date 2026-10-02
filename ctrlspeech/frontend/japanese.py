@@ -90,6 +90,36 @@ class JapaneseFrontendResult:
         return max(phrase_ids, default=-1) + 1
 
 
+    def model_linguistic_features(self) -> dict[str, tuple]:
+        """Return phone-aligned values consumed by DiTar.
+
+        accent_pitch IDs are 0=unknown, 1=Low, 2=High. phrase_boundary uses
+        bit0=start and bit1=end. valid distinguishes an actual linguistic phone
+        from pauses/separators, so accent nucleus 0 remains a meaningful flat
+        accent value rather than an absence sentinel.
+        """
+        pitch_id = {None: 0, "Low": 1, "High": 2}
+        return {
+            "accent_pitch": tuple(
+                pitch_id[feature.pitch] for feature in self.phone_features
+            ),
+            "phrase_boundary": tuple(
+                int(feature.is_accent_phrase_start)
+                | (int(feature.is_accent_phrase_end) << 1)
+                for feature in self.phone_features
+            ),
+            "accent_nucleus": tuple(
+                feature.accent_nucleus for feature in self.phone_features
+            ),
+            "phrase_mora_count": tuple(
+                feature.phrase_mora_count for feature in self.phone_features
+            ),
+            "valid": tuple(
+                not feature.is_pause for feature in self.phone_features
+            ),
+        }
+
+
 class JapaneseFrontend:
     """Japanese normalization, G2P and phone-aligned accent analysis."""
 
@@ -462,3 +492,28 @@ class JapaneseFrontend:
                 "text did not contain any alignable Japanese words"
             )
         return result.mfa_transcript
+
+
+
+def join_linguistic_features(
+    prompt: JapaneseFrontendResult,
+    target: JapaneseFrontendResult,
+) -> dict[str, tuple]:
+    """Join prompt and target features around the explicit phone separator."""
+    prompt_features = prompt.model_linguistic_features()
+    target_features = target.model_linguistic_features()
+    separator = {
+        "accent_pitch": 0,
+        "phrase_boundary": 0,
+        "accent_nucleus": 0,
+        "phrase_mora_count": 0,
+        "valid": False,
+    }
+    return {
+        key: (
+            tuple(prompt_features[key])
+            + (separator[key],)
+            + tuple(target_features[key])
+        )
+        for key in separator
+    }
