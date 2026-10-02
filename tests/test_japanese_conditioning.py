@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from ctrlspeech.models.ditar import DiTar
 from ctrlspeech.models.embeds import JapaneseLinguisticConditioner
 
 
@@ -33,3 +34,16 @@ def test_japanese_linguistic_conditioner_requires_aligned_length():
     conditioner = JapaneseLinguisticConditioner(dim=16)
     with pytest.raises(ValueError, match="must have shape"):
         conditioner(_features(), batch_size=1, sequence_length=5)
+
+
+def test_unavailable_segment_does_not_leak_frame_zero_conditioning():
+    frame_embed = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    pooled = DiTar._aggregate_segment_embed(
+        None,
+        frame_embed,
+        [(0, 0), (1, 3), (6, 6)],
+    )
+
+    torch.testing.assert_close(pooled[0], torch.zeros(4))
+    torch.testing.assert_close(pooled[1], frame_embed[1:3].mean(dim=0))
+    torch.testing.assert_close(pooled[2], torch.zeros(4))
