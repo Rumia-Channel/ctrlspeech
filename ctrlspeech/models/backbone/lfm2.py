@@ -136,7 +136,14 @@ class LFM2SpeechBackbone(nn.Module):
             )
 
         if load_pretrained_weights:
-            self.model = Lfm2Model.from_pretrained(model_id)
+            # Keep the whole DiTAR graph in float32 by default. Training can
+            # still use autocast/bfloat16 globally, but mixed parameter dtypes
+            # between a bf16 base checkpoint and new speech adapters would make
+            # inputs_embeds integration fragile.
+            self.model = Lfm2Model.from_pretrained(
+                model_id,
+                dtype=torch.float32,
+            )
         else:
             self.model = Lfm2Model(config or lfm2_350m_config())
 
