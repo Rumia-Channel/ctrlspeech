@@ -227,6 +227,26 @@ class LFM2SpeechBackbone(nn.Module):
         past_key_values=None,
         use_cache: bool | None = True,
     ):
+        """Incrementally decode embeddings with the native LFM2 cache.
+
+        Cached decoding receives only new acoustic token(s), while attention
+        masks and callers may still carry the complete prefix history. Slice
+        the modality history to the unprocessed tail before adding embeddings.
+        """
+        if modality_type_ids is not None:
+            current_length = input_embeds.shape[1]
+            if modality_type_ids.shape[0] != input_embeds.shape[0]:
+                raise ValueError(
+                    "modality_type_ids batch size does not match input"
+                )
+            if modality_type_ids.shape[1] < current_length:
+                raise ValueError(
+                    "modality_type_ids is shorter than the incremental input: "
+                    f"{modality_type_ids.shape[1]} < {current_length}"
+                )
+            if modality_type_ids.shape[1] != current_length:
+                modality_type_ids = modality_type_ids[:, -current_length:]
+
         x = self._add_modality(input_embeds, modality_type_ids)
         outputs = self.model(
             inputs_embeds=x,
