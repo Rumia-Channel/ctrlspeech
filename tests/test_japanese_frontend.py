@@ -1,4 +1,6 @@
-from ctrlspeech.frontend import JapaneseFrontend
+import pytest
+
+from ctrlspeech.frontend import JapaneseFrontend, validate_japanese_phones
 
 
 class FakeOpenJTalk:
@@ -95,3 +97,14 @@ def test_japanese_frontend_keeps_phone_and_accent_metadata():
 def test_japanese_frontend_normalizes_fullwidth_ascii():
     frontend = JapaneseFrontend(backend=FakeOpenJTalk())
     assert frontend.normalize("ＡＢＣ  １２３") == "ABC 123"
+
+
+def test_japanese_phone_inventory_rejects_unknown_tokens():
+    assert validate_japanese_phones(["ky", "o", "N", "pau"]) == (
+        "ky",
+        "o",
+        "N",
+        "pau",
+    )
+    with pytest.raises(ValueError, match="Unsupported CtrlSpeech-JA phone"):
+        validate_japanese_phones(["not-a-phone"])
