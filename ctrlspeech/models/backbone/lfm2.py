@@ -118,6 +118,7 @@ class LFM2SpeechBackbone(nn.Module):
         load_pretrained_weights: bool = True,
         config: Lfm2Config | None = None,
         weighted_layers: bool = False,
+        validate_architecture: bool = True,
     ):
         super().__init__()
         if phone_vocab_size < 2:
@@ -139,7 +140,8 @@ class LFM2SpeechBackbone(nn.Module):
         else:
             self.model = Lfm2Model(config or lfm2_350m_config())
 
-        _validate_lfm2_350m(self.model.config)
+        if validate_architecture:
+            _validate_lfm2_350m(self.model.config)
         self.model_id = model_id
         self.hidden_size = int(self.model.config.hidden_size)
 
