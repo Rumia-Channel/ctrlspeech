@@ -70,7 +70,9 @@ def test_lfm2_cached_decode_matches_full_decode():
         )
         cached_tail, _ = backbone.inference(
             input_embeds=input_embeds[:, -1:],
-            modality_type_ids=modality[:, -1:],
+            # Real CtrlSpeech sampling retains full modality history while only
+            # passing the new acoustic token after the first cached step.
+            modality_type_ids=modality,
             padding_mask=full_mask,
             past_key_values=cache,
             use_cache=True,
@@ -96,3 +98,37 @@ def test_phone_embedding_is_separate_from_native_lfm_embedding():
     native = backbone.embed_native_tokens(ids)
     assert phone.shape == native.shape
     assert phone.data_ptr() != native.data_ptr()
+
+
+def test_compose_text_prefix_preserves_native_lfm_and_phone_modalities():
+    backbone = LFM2SpeechBackbone(
+        phone_vocab_size=16,
+        load_pretrained_weights=False,
+        config=_tiny_lfm2_config(),
+        validate_architecture=False,
+    ).eval()
+
+    phone_ids = torch.tensor([[2, 3, 0]])
+    phone_embeds = backbone.embed_phone_tokens(phone_ids)
+    phone_mask = phone_ids.ne(0)
+    native_ids = torch.tensor([[1, 7]])
+
+    embeds, mask, modality = backbone.compose_text_prefix(
+        phone_embeds=phone_embeds,
+        phone_mask=phone_mask,
+        native_text_ids=native_ids,
+    )
+
+    assert embeds.shape == (1, 5, 32)
+    assert mask.tolist() == [[True, True, True, True, False]]
+    assert modality.tolist() == [[
+        backbone.NATIVE_TEXT_MODALITY,
+        backbone.NATIVE_TEXT_MODALITY,
+        backbone.PHONE_MODALITY,
+        backbone.PHONE_MODALITY,
+        backbone.PHONE_MODALITY,
+    ]]
+    torch.testing.assert_close(
+        embeds[:, :2],
+        backbone.embed_native_tokens(native_ids),
+    )
