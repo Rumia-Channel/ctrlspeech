@@ -202,6 +202,10 @@ class LFM2SpeechBackbone(nn.Module):
         if phone_mask.shape != phone_embeds.shape[:2]:
             raise ValueError("phone_mask must match phone_embeds [B, L]")
 
+        phone_mask = phone_mask.to(
+            device=phone_embeds.device,
+            dtype=torch.bool,
+        )
         batch, phone_length = phone_mask.shape
         phone_modality = torch.full(
             (batch, phone_length),
