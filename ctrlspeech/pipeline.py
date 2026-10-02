@@ -27,7 +27,12 @@ from .align import MFAAligner
 from .assets import download_assets
 from .features import CosyVoiceSpeakerEmbedding, f0_to_coarse, get_pitch_and_loudness
 from .models import DiTar, load_decoder
-from .retime import MAX_DURATION_FRAMES, MAX_TIMELINE_FRAMES
+from .models.backbone import DEFAULT_LFM2_MODEL_ID
+from .retime import (
+    MAX_DURATION_FRAMES,
+    MAX_TARGET_SECONDS,
+    MAX_TIMELINE_FRAMES,
+)
 
 SAMPLE_RATE = 16000
 HOP_LENGTH = 160                    # 100 frames/s, matching the *100 in duration_segments
@@ -50,23 +55,25 @@ AR_STEP_SECONDS = AR_PATCH_SIZE / VAE_FRAMES_PER_SECOND
 DEFAULT_STEPS = 32
 DEFAULT_CFG_STRENGTH = 1.5
 TRIM_TOP_DB = 40
+AR_STOP_MARGIN_STEPS = 20
+MAX_AR_STEPS = int(np.ceil(MAX_TARGET_SECONDS / AR_STEP_SECONDS)) + AR_STOP_MARGIN_STEPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Text / timing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def estimate_max_seq_length(target_seconds):
-    """Pick an AR step ceiling from the intended duration.
+    """Pick an AR step ceiling for utterances up to one minute.
 
-    The stop predictor normally ends the utterance early; this only has to avoid
-    truncating it. A fixed cap of 100 steps covers just 10 s, which silently cuts
-    off the tail once a duration edit stretches the sentence.
+    A small relative margin helps the stop predictor on ordinary utterances,
+    while MAX_AR_STEPS remains a hard safety ceiling near 60 seconds.
     """
     target_seconds = float(target_seconds)
     if not np.isfinite(target_seconds) or target_seconds <= 0:
         return 100
-    steps = int(np.ceil(target_seconds / AR_STEP_SECONDS * 1.35)) + 10
-    return int(np.clip(steps, 100, 400))
+    target_seconds = min(target_seconds, float(MAX_TARGET_SECONDS))
+    steps = int(np.ceil(target_seconds / AR_STEP_SECONDS * 1.15)) + 10
+    return int(np.clip(steps, 100, MAX_AR_STEPS))
 
 
 def tokenize_phones(prompt_phones, target_phones, text_tokenizer):
@@ -220,13 +227,23 @@ class CtrlSpeech:
         )
 
         config = OmegaConf.load(assets.config_path)
-        # The published config carries placeholders; only local paths differ per
-        # machine, so they are resolved here rather than baked into the YAML.
+        # This branch is intentionally LFM2-only. Published upstream CtrlSpeech
+        # Qwen checkpoints are architecture-incompatible and must not be loaded
+        # partially with strict=False.
+        backbone_name = str(getattr(config.model.backbone, "name", "")).lower()
+        if backbone_name not in {"lfm2", "lfm2.5", "lfm2.5-350m"}:
+            raise RuntimeError(
+                "The japanese branch requires an LFM2.5-350M-trained "
+                "CtrlSpeech checkpoint. Upstream Qwen3 checkpoints are not "
+                "compatible with this architecture."
+            )
+
         config.model.vocoder.path = str(assets.svae_dir)
-        config.model.backbone.qwen_config_path = str(assets.qwen_config_path)
-        config.model.backbone.pretrained_LM_path = None
-        # The fine-tuned AR weights are already in the checkpoint (1.7 GB of
-        # model.causalAR.*), so pulling Qwen3-0.6B would only be overwritten.
+        if not getattr(config.model.backbone, "model_id", None):
+            config.model.backbone.model_id = DEFAULT_LFM2_MODEL_ID
+        # A trained CtrlSpeech-JA checkpoint already contains the complete LFM
+        # body, so inference must instantiate the architecture without fetching
+        # the original base weights first.
         config.model.backbone.load_pretrained_weights = False
 
         text_tokenizer = json.loads(assets.vocab_path.read_text(encoding="utf-8"))
@@ -561,7 +578,11 @@ def _load_state_dict(path):
     return checkpoint.get("state_dict", checkpoint)
 
 
-_CONTROL_KEYS = ("pitch_embedding", "loudness_embedding", "duration_embedding")
+_CONTROL_KEYS = (
+    "pitch_embedding",
+    "loudness_embedding",
+    "duration_conditioner",
+)
 
 
 def _check_control_weights(missing, spec):
