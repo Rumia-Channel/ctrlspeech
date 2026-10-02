@@ -7,6 +7,7 @@ model:
   dim: 1024
   mlp_hidden_dim: 512
   use_seperate_linear: true
+  control_drop_prob: 0.5
 
   aggregation_encoder:
     name: local_transformer
@@ -41,9 +42,10 @@ model:
     time_schedule: false
     history_vae_window_size: 4
     drop_cond_prob: 0.1
+    speaker_drop_prob: 0.5
 
   drop_condition: drop_ctx_or_his
-  stop_predictor_type: transformer
+  stop_predictor_type: mlp
 
   vocoder:
     path: ../svae

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from x_transformers.x_transformers import RotaryEmbedding
 
 from ..modules.layers import (
@@ -111,9 +112,9 @@ class DiT(nn.Module):
             residual = x
 
         for block in self.transformer_blocks:
-            if self.checkpoint_activations:
+            if self.checkpoint_activations and self.training and torch.is_grad_enabled():
                 # https://pytorch.org/docs/stable/checkpoint.html#torch.utils.checkpoint.checkpoint
-                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, t, mask, rope, use_reentrant=False)
+                x = checkpoint(self.ckpt_wrapper(block), x, t, mask, rope, use_reentrant=False)
             else:
                 x = block(x, t, mask=mask, rope=rope)
 

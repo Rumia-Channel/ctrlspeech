@@ -117,6 +117,10 @@ The Panel/demo inference path requires a trained
 `japanese-lfm2-350m` checkpoint and intentionally does not fall back to the
 upstream Qwen checkpoints.
 
+For cached-feature training, staged LFM2 fine-tuning, dataset auditing and
+checkpoint resume, see [TRAINING.md](TRAINING.md) and
+[`configs/japanese-training.yaml`](configs/japanese-training.yaml).
+
 ---
 
 ## Models
@@ -184,7 +188,8 @@ ctrlspeech/
   cli.py         the `ctrlspeech` command
   align/         MFA wrapper, 4-line annotation format
   features/      pitch, loudness and speaker-embedding extraction
-  models/        DiTar, Qwen3 backbone, LocDiT, SVAE/DAC vocoder
+  models/        DiTar, LFM2 backbone, LocDiT, SVAE/DAC vocoder
+  training/      cached features, length curriculum, staged trainer and CLI
 demo/
   app.py             Panel application
   interactive_plot.py Bokeh contour and phoneme editor

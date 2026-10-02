@@ -1,0 +1,40 @@
+# Starting recipe; choose epoch counts from held-out synthesis quality.
+# Duration is prompt + target combined, on the 40 Hz latent clock.
+seed: 42
+validation_seed: 1234
+batch_size: 2
+accumulation_steps: 8
+precision: bf16
+num_workers: 0
+latent_fps: 40
+gradient_checkpointing: true
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_steps: 100
+min_lr_ratio: 0.1
+loss_weights:
+  diff_loss: 1.0
+  stop_loss: 0.1
+  ar_l1_loss: 0.0001
+  vae_projected_l1_loss: 0.0001
+stages:
+  - epochs: 2
+    max_seconds: 5
+    train_backbone: false
+    adapter_lr: 0.0001
+    backbone_lr: 0.00001
+  - epochs: 2
+    max_seconds: 15
+    train_backbone: true
+    adapter_lr: 0.0001
+    backbone_lr: 0.00001
+  - epochs: 2
+    max_seconds: 30
+    train_backbone: true
+    adapter_lr: 0.00005
+    backbone_lr: 0.000005
+  - epochs: 2
+    max_seconds: 60
+    train_backbone: true
+    adapter_lr: 0.00002
+    backbone_lr: 0.000002

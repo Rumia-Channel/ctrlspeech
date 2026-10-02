@@ -98,7 +98,12 @@ class AggregationEncoder(nn.Module):
             )
         else:
             inputs = folded_x
-            valid = folded_mask
+            valid = folded_mask.clone()
+            # Attention with no valid key can produce NaNs on some kernels.
+            # Enable a zero dummy key, then zero out this patch after pooling.
+            empty = ~valid.any(dim=1)
+            inputs = inputs.masked_fill(~folded_mask.unsqueeze(-1), 0)
+            valid[empty, 0] = True
 
         hidden = self.model(inputs, src_key_padding_mask=~valid)
         hidden = self.final_norm(hidden)
@@ -114,4 +119,5 @@ class AggregationEncoder(nn.Module):
         summary_padding_mask = folded_mask.any(dim=-1).reshape(
             batch, num_patches
         )
+        summary_tokens = summary_tokens.masked_fill(~summary_padding_mask.unsqueeze(-1), 0)
         return summary_tokens, summary_padding_mask

@@ -151,18 +151,21 @@ asset tree. After a checkpoint is published, `CTRLSPEECH_HF_REPO` or the
 
 ## Remaining training work
 
-The inference/model/frontend architecture is now LFM2-native, but producing a
-usable Japanese checkpoint still requires the actual Japanese training
-pipeline and data:
+The cached-feature dataset, collator and staged trainer are implemented. See
+[TRAINING.md](TRAINING.md) for the feature schema, audit command, freeze/unfreeze
+recipe, 5 -> 15 -> 30 -> 60 second curriculum and epoch-boundary resume.
+The trainer supports mixed precision, gradient checkpointing, target-only
+supervision and speaker-disjoint validation.
+
+Producing a usable Japanese checkpoint still requires real corpus preparation
+and quality evaluation:
 
 1. OpenJTalk-to-MFA duration reconciliation and preprocessing QC.
 2. Audio/F0/loudness/speaker/SVAE feature preprocessing.
-3. Long-form Japanese dataset/collator integration.
-4. Staged fine-tuning of new speech adapters followed by the LFM2 body.
-5. 5 -> 15 -> 30 -> 60 second curriculum.
-6. Evaluation of CER, speaker similarity, accent/F0 control, duration accuracy,
+3. Training and tuning the supplied staged recipe on the prepared corpus.
+4. Evaluation of CER, speaker similarity, accent/F0 control, duration accuracy,
    long-form drift, RTF and VRAM.
-7. LocDiT NFE reduction only after the quality baseline is fixed.
+5. LocDiT NFE reduction only after the quality baseline is fixed.
 
 ## License note
 

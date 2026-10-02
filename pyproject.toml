@@ -57,6 +57,7 @@ dev = [
 
 [project.scripts]
 ctrlspeech = "ctrlspeech.cli:main"
+ctrlspeech-train = "ctrlspeech.training.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["ctrlspeech*"]
