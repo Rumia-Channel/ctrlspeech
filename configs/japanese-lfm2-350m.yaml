@@ -1,6 +1,6 @@
 model:
   name: DiTAR
-  text_vocab_size: 64
+  text_vocab_size: 51
   audio_type: vae_online
   audio_channels: 64
   patch_size: 4
@@ -21,7 +21,7 @@ model:
   backbone:
     name: LFM2
     model_id: LiquidAI/LFM2.5-350M-Base
-    phone_vocab_size: 64
+    phone_vocab_size: 51
     load_pretrained_weights: true
     freeze_pretrained_body: false
     weighted_layers: false
