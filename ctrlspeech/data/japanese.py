@@ -57,6 +57,7 @@ def encode_japanese_text(
     frontend: JapaneseFrontend | None = None,
     phone_vocab: Mapping[str, int] | None = None,
     run_marine: bool = False,
+    allow_unknown: bool = False,
 ) -> JapaneseTextEncoding:
     """Analyze text and map canonical OpenJTalk phones to model IDs."""
 
@@ -64,7 +65,23 @@ def encode_japanese_text(
     vocab = dict(phone_vocab or JAPANESE_PHONE_TO_ID)
     result = frontend.analyze(text, run_marine=run_marine)
 
+    unknown_surfaces = [
+        morpheme.surface
+        for morpheme in result.morphemes
+        if morpheme.is_unknown
+    ]
+    if unknown_surfaces and not allow_unknown:
+        raise ValueError(
+            "pyopenjtalk-plus reported unknown Japanese token(s): "
+            + ", ".join(unknown_surfaces)
+        )
+
     phones = validate_japanese_phones(result.phones, allow_separator=False)
+    if "unk" in phones and not allow_unknown:
+        raise ValueError(
+            "pyopenjtalk-plus emitted an unknown phone; fix the reading or "
+            "explicitly set allow_unknown=True for diagnostics"
+        )
     missing = sorted({phone for phone in phones if phone not in vocab})
     if missing:
         raise ValueError(
