@@ -12,13 +12,13 @@ headlessly.
 import numpy as np
 from scipy.interpolate import interp1d as scipy_interp1d
 
-# duration_embedding accepts indices 0..191, so one phone spans at most 191 frames.
-MAX_DURATION_FRAMES = 191
-# Longest edited timeline, in 10 ms frames (20.00 s plus the t=0 frame). The AR
-# step count is derived from the target duration, so this is the only ceiling.
-# The demo and the pipeline both import these two limits from here: keeping
-# separate copies in sync by hand already caused one mismatch.
-MAX_TIMELINE_FRAMES = 2001
+# CtrlSpeech-JA targets utterances up to one minute.  Durations are continuous
+# now (no 192-entry lookup table), so this is a safety bound rather than an
+# embedding-index limit.
+MAX_TARGET_SECONDS = 60
+CONTROL_FPS = 100
+MAX_TIMELINE_FRAMES = MAX_TARGET_SECONDS * CONTROL_FPS + 1
+MAX_DURATION_FRAMES = MAX_TIMELINE_FRAMES - 1
 
 
 def time_to_frame_index(time_sec, hop_length=256, sample_rate=24000):
@@ -228,8 +228,9 @@ def retime_word_curves(
         later["start"] = float(later["start"]) + delta
         later["end"] = float(later["end"]) + delta
 
-    # Validate every phone, not just the selected word: the model's duration
-    # embedding has indices 0..191, and zero-frame phones are invalid.
+    # Validate every phone, not just the selected word. Zero-frame phones are
+    # invalid; the upper bound is now the one-minute timeline safety ceiling,
+    # not a lookup-table index.
     for phone_idx, phone in enumerate(new_phonemes):
         start_frame = int(round(float(phone[1]) / frame_sec))
         end_frame = int(round(float(phone[2]) / frame_sec))
