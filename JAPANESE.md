@@ -57,21 +57,25 @@ silently enter training data.
 `ctrlspeech.data` provides:
 
 ```python
+from transformers import AutoTokenizer
 from ctrlspeech.data import (
-    encode_japanese_text,
-    join_prompt_target,
     collate_japanese_sequences,
+    encode_japanese_pair,
 )
 
-prompt = encode_japanese_text("これは参照音声です。")
-target = encode_japanese_text("今日は良い天気ですね。")
-sequence = join_prompt_target(prompt, target)
+tokenizer = AutoTokenizer.from_pretrained("LiquidAI/LFM2.5-350M-Base")
+sequence = encode_japanese_pair(
+    "これは参照音声です。",
+    "今日は良い天気ですね。",
+    native_tokenizer=tokenizer,
+)
 batch = collate_japanese_sequences([sequence])
 ```
 
-The resulting sequence contains canonical phone IDs and phone-aligned Japanese
-linguistic features. The explicit `|` prompt/target separator has linguistic
-conditioning disabled.
+The resulting sequence contains two complementary inputs: native LFM Japanese
+tokens as a semantic prefix, and canonical OpenJTalk phone IDs with phone-aligned
+linguistic features. The phone stream remains authoritative for pronunciation.
+The explicit `|` prompt/target separator has linguistic conditioning disabled.
 
 ## Prosody controls
 
@@ -79,7 +83,8 @@ The existing CtrlSpeech pitch and loudness controls remain discrete.
 
 Duration no longer uses the upstream 192-entry embedding table. It is now a
 continuous log-compressed MLP conditioner, so there is no 191-frame embedding
-index ceiling.
+index ceiling. A zero-length segment is an explicit "conditioning unavailable"
+sentinel and contributes exactly zero pitch/loudness/duration conditioning.
 
 Japanese linguistic conditioning currently includes:
 
@@ -97,7 +102,7 @@ The branch targets utterances up to 60 seconds:
 
 - control timeline: 6001 points at 100 Hz
 - acoustic AR step: approximately 0.1 s
-- hard AR safety ceiling: 620 steps
+- hard AR safety ceiling: 600 steps
 - continuous duration safety limit: 6000 control frames
 
 The LocDiT sampler is intentionally left architecturally unchanged for the
