@@ -21,3 +21,6 @@ ctrlspeech-hf/
 outputs/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+
+# Generated in-memory session sidecar
+/:memory:.ses

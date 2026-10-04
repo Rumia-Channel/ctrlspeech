@@ -20,6 +20,8 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
+import threading
 from pathlib import Path
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
@@ -82,6 +84,8 @@ def load_examples():
     entries = json.loads(manifest.read_text(encoding="utf-8"))
     available = []
     for entry in entries:
+        if entry.get("language") != "ja":
+            continue
         paths = {
             key: ASSET_DIR / entry[key]
             for key in ("prompt_wav", "prompt_txt", "target_wav", "target_txt")
@@ -97,10 +101,15 @@ EXAMPLES = load_examples()
 # ─────────────────────────────────────────────────────────────────────────────
 # Model (loaded once per process, shared across browser sessions)
 # ─────────────────────────────────────────────────────────────────────────────
+_MODEL_LOAD_LOCK = threading.Lock()
+
+
 def get_model():
-    if "ctrlspeech" not in pn.state.cache:
-        pn.state.cache["ctrlspeech"] = CtrlSpeech.from_pretrained(MODEL_NAME)
-    return pn.state.cache["ctrlspeech"]
+    # Sessions share the same process cache; first-use uploads may race.
+    with _MODEL_LOAD_LOCK:
+        if "ctrlspeech" not in pn.state.cache:
+            pn.state.cache["ctrlspeech"] = CtrlSpeech.from_pretrained(MODEL_NAME)
+        return pn.state.cache["ctrlspeech"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -237,35 +246,43 @@ def synthesize_baseline(example, steps, cfg_strength):
     target_annotation = annotate_audio(example["target_wav"], target_text, tts.aligner)
     return tts.generate(
         example["prompt_wav"], prompt_annotation, target_annotation,
-        steps=steps, cfg_strength=cfg_strength,
+        steps=steps, cfg_strength=cfg_strength, trim_prompt=True,
     )
 
 
-def adopt_upload(audio_bytes, filename, transcript, steps, cfg_strength):
+def adopt_upload(audio_bytes, filename, transcript, steps, cfg_strength, annotation_bytes=None):
     """Validate and decode an upload, then hand it to CtrlSpeech.from_audio."""
     import librosa
 
+    annotation = None
+    if annotation_bytes:
+        lines = annotation_bytes.decode("utf-8-sig").strip().splitlines()
+        if len(lines) != 4:
+            raise ValueError("Canonical annotation needs four lines: words, phones, starts, ends.")
+        annotation = dict(zip(("words", "phones", "starts", "ends"), lines))
+        transcript = transcript or annotation["words"]
     transcript = " ".join((transcript or "").split())
     if not transcript:
         raise ValueError("Type the transcript of the uploaded audio first.")
     if not audio_bytes:
         raise ValueError("Choose an audio file to upload first.")
 
+    # Per-request directories prevent simultaneous sessions overwriting or
+    # unlinking each other's upload. TemporaryDirectory is portable on Windows.
+    suffix = Path(filename or "audio.wav").suffix.lower() or ".wav"
+    with tempfile.TemporaryDirectory(prefix="ctrlspeech-upload-") as scratch:
+        upload_path = Path(scratch) / f"upload{suffix}"
+        upload_path.write_bytes(audio_bytes)
+        try:
+            audio_np, _ = librosa.load(str(upload_path), sr=SAMPLE_RATE, mono=True)
+        except Exception as exc:
+            raise ValueError(f"Could not decode the uploaded audio: {exc}") from exc
     tts = get_model()
-    scratch = Path(os.environ.get("TMPDIR", "/tmp")) / "ctrlspeech-upload"
-    scratch.mkdir(parents=True, exist_ok=True)
-    upload_path = scratch / f"upload{Path(filename or 'audio.wav').suffix.lower() or '.wav'}"
-    upload_path.write_bytes(audio_bytes)
-    try:
-        audio_np, _ = librosa.load(str(upload_path), sr=SAMPLE_RATE, mono=True)
-    except Exception as exc:
-        raise ValueError(f"Could not decode the uploaded audio: {exc}") from exc
-    finally:
-        upload_path.unlink(missing_ok=True)
 
     return tts.from_audio(
         audio_np, transcript, steps=steps, cfg_strength=cfg_strength,
         min_seconds=UPLOAD_MIN_SECONDS, max_seconds=UPLOAD_MAX_SECONDS,
+        annotation=annotation,
     )
 
 
@@ -305,9 +322,10 @@ def build_app():
     upload_input = pn.widgets.FileInput(
         accept=".wav,.mp3,.flac,.ogg,.m4a", multiple=False, width=460
     )
+    annotation_input = pn.widgets.FileInput(accept=".txt", multiple=False, width=460)
     transcript_input = pn.widgets.TextAreaInput(
         name="Transcript · exactly the words spoken in the clip",
-        placeholder="If you dream a thing more than once, it's sure to come true.",
+        placeholder="今日は良い天気ですね。",
         height=88, width=460,
     )
     upload_focus = pn.widgets.RadioButtonGroup(
@@ -333,6 +351,7 @@ def build_app():
         "duration_edit": None,
         "upload_mode": not EXAMPLES,
         "example": EXAMPLES[0] if EXAMPLES else None,
+        "busy": False,
     }
 
     # -- shared UI helpers ------------------------------------------------
@@ -360,6 +379,7 @@ def build_app():
         )
 
     def set_busy(busy, msg=""):
+        session["busy"] = busy
         spinner.value = spinner.visible = busy
         for widget in (gen1_btn, example_select, example_focus, source_select,
                        upload_btn, upload_focus):
@@ -384,7 +404,7 @@ def build_app():
     def curve_mean(values, voiced_only=False):
         values = np.asarray(values, dtype=float)
         if voiced_only:
-            values = values[values > 1]
+            values = values[values > 0]
         return float(values.mean()) if len(values) else float("nan")
 
     # -- step 2: the control panel ---------------------------------------
@@ -715,6 +735,8 @@ def build_app():
         regeneration_container[:] = [pn.layout.Divider(), build_regen_section()]
 
     async def on_gen1(_):
+        if session["busy"]:
+            return
         set_busy(True, "Generating the baseline and aligning words / phonemes with MFA…")
         clear_generated()
         session["upload_mode"] = False
@@ -734,6 +756,8 @@ def build_app():
             pn.state.notifications.error(str(exc)[:200])
 
     async def on_upload(_):
+        if session["busy"]:
+            return
         set_busy(True, "Analysing the uploaded audio and aligning it with MFA…")
         clear_generated()
         session["upload_mode"] = True
@@ -742,6 +766,7 @@ def build_app():
             state = await asyncio.get_event_loop().run_in_executor(
                 None, adopt_upload, upload_input.value, upload_input.filename,
                 transcript_input.value, DEFAULT_STEPS, DEFAULT_CFG_STRENGTH,
+                annotation_input.value,
             )
             install_baseline(state, [
                 audio_pane(state.gen_np, "Uploaded audio · Voice + baseline prosody"),
@@ -765,6 +790,9 @@ def build_app():
         gen2_out = pn.Column()
 
         async def on_gen2(_):
+            if session["busy"]:
+                return
+            session["busy"] = True
             for widget in (gen2_btn, gen1_btn, example_select, source_select, upload_btn):
                 widget.disabled = True
             gen2_spinner.value = gen2_spinner.visible = True
@@ -777,6 +805,8 @@ def build_app():
                 edited_f0 = editor.get_pitch()
                 edited_loud = editor.get_loudness()
                 edited_phonemes = editor.get_phonemes()
+                requested_words = editor.get_words()
+                duration_edit = dict(session["duration_edit"]) if session["duration_edit"] else None
                 tts = get_model()
                 res = await asyncio.get_event_loop().run_in_executor(
                     None,
@@ -788,8 +818,13 @@ def build_app():
 
                 achieved_words = None
                 duration_message = None
-                duration_edit = session["duration_edit"]
-                if focus == "duration" and duration_edit:
+                if focus == "duration" and duration_edit and state.extras.get("canonical_annotation"):
+                    duration_message = (
+                        f"**{duration_edit['label']}** · requested "
+                        f"{duration_edit['requested']:.2f}s · achieved duration unverified; "
+                        "the output needs new canonical timings."
+                    )
+                elif focus == "duration" and duration_edit:
                     gen2_status.object = (
                         "Audio generated. Verifying the target word's actual "
                         "duration with MFA…"
@@ -850,7 +885,7 @@ def build_app():
                     if duration_message:
                         output.append(pn.pane.Markdown(duration_message))
                     output.append(pn.pane.Bokeh(duration_comparison_figure(
-                        state.word_data, editor.get_words(), achieved_words,
+                        state.word_data, requested_words, achieved_words,
                         duration_edit["word_idx"] if duration_edit else None,
                     )))
 
@@ -860,6 +895,7 @@ def build_app():
                 gen2_status.object = f"Error: {exc}"
                 pn.state.notifications.error(str(exc)[:200])
             finally:
+                session["busy"] = False
                 for widget in (gen2_btn, gen1_btn, example_select, source_select,
                                upload_btn):
                     widget.disabled = False
@@ -888,6 +924,13 @@ def build_app():
             f"must be {UPLOAD_MIN_SECONDS:g}–{UPLOAD_MAX_SECONDS:g}s."
         ),
         upload_input, transcript_input,
+        pn.pane.Markdown(
+            "**Canonical OpenJTalk annotation (.txt)** · Four lines: transcript, "
+            "phones, starts, ends. Times refer to the full untrimmed upload. "
+            "Required until raw Japanese MFA timings are reconciled. The "
+            "annotation's transcript is used when the text box is empty."
+        ),
+        annotation_input,
         pn.pane.Markdown("**Control to edit**", margin=(4, 0, -8, 0)),
         upload_focus, pn.Row(upload_btn),
         visible=not EXAMPLES,

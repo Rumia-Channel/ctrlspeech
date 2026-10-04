@@ -330,3 +330,212 @@ def test_validate_only_audits_caches_without_model_download(tmp_path, capsys):
     with pytest.raises(ValueError, match="speaker IDs overlap"):
         main(["--train-manifest", str(train), "--validation-manifest", str(train),
               "--output-dir", str(tmp_path / "output"), "--svae-dir", str(tmp_path), "--validate-only"])
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("vae_features", [], "vae_features must be a tensor"),
+    ("speaker_embs", [0] * 192, "speaker_embs must be a tensor"),
+    ("text_inputs", [2, 3, 4], "text_inputs must be a tensor"),
+    ("linguistic_features", None, "linguistic_features must be a dictionary"),
+    ("native_text_inputs", None, "native_text_inputs must be a tensor"),
+    ("prompt_frames", True, "prompt_frames"),
+])
+def test_cache_schema_rejects_wrong_types_with_actionable_errors(field, value, message):
+    cached = example()
+    cached[field] = value
+    with pytest.raises(ValueError, match=message):
+        validate_example(cached)
+
+
+def test_cache_root_and_linguistic_fields_require_tensors():
+    with pytest.raises(ValueError, match="feature cache must be a dictionary"):
+        validate_example([])
+    cached = example()
+    cached["linguistic_features"]["accent_nucleus"] = [1., 0., 1., 1.]
+    with pytest.raises(ValueError, match="accent_nucleus must be a tensor"):
+        validate_example(cached)
+    cached["linguistic_features"]["accent_nucleus"] = torch.ones(4, dtype=torch.complex64)
+    with pytest.raises(ValueError, match="nonnegative real numeric"):
+        validate_example(cached)
+
+
+def test_cache_controls_require_one_ordered_shared_timeline():
+    cached = example(controls=True)
+    cached["loudness"] = cached["loudness"][:-1]
+    with pytest.raises(ValueError, match="same control timeline length"):
+        validate_example(cached)
+    cached = example(controls=True)
+    cached["duration_segments"][2] = torch.tensor([5, 20])
+    with pytest.raises(ValueError, match="ordered and nonoverlapping"):
+        validate_example(cached)
+    # Empty segments are allowed anywhere and carry no timeline ordering.
+    cached["duration_segments"][2] = torch.tensor([1, 1])
+    validate_example(cached)
+
+
+def test_collation_does_not_silently_drop_partial_controls():
+    cached = example(controls=True)
+    del cached["duration_segments"]
+    with pytest.raises(ValueError, match="provided together"):
+        collate_speech_examples([cached])
+
+
+def test_collation_normalizes_cached_float_dtypes_for_real_model(tiny_model):
+    half, double = example(6), example(9)
+    for cached, dtype in ((half, torch.float16), (double, torch.float64)):
+        for name in ("vae_features", "speaker_embs"):
+            cached[name] = cached[name].to(dtype)
+        validate_example(cached)
+    batch = collate_speech_examples([half, double])
+    assert batch["vae_features"].dtype == batch["speaker_embs"].dtype == torch.float32
+    torch.testing.assert_close(batch["vae_features"][1], double["vae_features"].float())
+    losses = tiny_model(**batch)
+    assert all(torch.isfinite(value) for value in losses.values())
+    losses["diff_loss"].backward()
+    assert tiny_model.LocDiT.proj_out.weight.grad is not None
+
+
+@pytest.mark.parametrize("entry,message", [
+    ("[]", "manifest entry must be an object"),
+    ("{", "invalid JSON"),
+    ('{"frames": true, "speaker_id": "speaker", "path": "cached.pt"}', "frames must be a positive integer"),
+    ('{"frames": 9, "speaker_id": "speaker"}', "path must be a nonempty string"),
+    ('{"frames": 9, "speaker_id": "speaker", "path": 42}', "path must be a nonempty string"),
+    ('{"frames": 9, "speaker_id": "  ", "path": "cached.pt"}', "speaker_id is required"),
+])
+def test_manifest_schema_errors_identify_file_and_line(tmp_path, entry, message):
+    manifest = tmp_path / "invalid.jsonl"
+    manifest.write_text("\n" + entry + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=message) as error:
+        CachedSpeechDataset(manifest)
+    assert f"{manifest}:2:" in str(error.value)
+
+
+def test_dataset_schema_errors_identify_cache_path(tmp_path):
+    manifest = write_dataset(tmp_path, "speaker")
+    cache_path = tmp_path / "speaker.pt"
+    torch.save({"vae_features": torch.zeros(9, 64)}, cache_path)
+    with pytest.raises(ValueError, match="feature cache is missing") as error:
+        CachedSpeechDataset(manifest)[0]
+    assert str(cache_path) in str(error.value)
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("batch_size", True), ("batch_size", 1.5), ("accumulation_steps", 1.5),
+    ("num_workers", 0.5), ("warmup_steps", 0.5), ("seed", 4.5),
+    ("validation_seed", False), ("gradient_checkpointing", "false"),
+])
+def test_training_config_rejects_noninteger_counts_and_ambiguous_flags(setting, value):
+    with pytest.raises(ValueError, match=setting):
+        TrainingConfig(stages=(TrainingStage(1, 5, False),), **{setting: value})
+
+
+@pytest.mark.parametrize("epochs,train_backbone,message", [
+    (True, False, "epochs"), (1.5, False, "epochs"), (1, "false", "train_backbone"),
+])
+def test_stage_rejects_noninteger_epochs_and_ambiguous_freezing(epochs, train_backbone, message):
+    with pytest.raises(ValueError, match=message):
+        TrainingStage(epochs, 5, train_backbone)
+
+
+def test_nonfinite_gradient_clears_accumulation_without_updating():
+    model = TinyObjective()
+    trainer = Trainer(model, training_config())
+    before = model.adapter.weight.detach().clone()
+    hook = model.adapter.weight.register_hook(lambda grad: torch.full_like(grad, float("inf")))
+    try:
+        with pytest.raises(RuntimeError, match="non-finite"):
+            trainer.train_epoch([{"text_inputs": torch.ones(1, 1)}], trainer.config.stages[0], total_stage_steps=1)
+    finally:
+        hook.remove()
+    torch.testing.assert_close(model.adapter.weight, before)
+    assert model.adapter.weight.grad is None
+    assert trainer.global_step == trainer.stage_step == 0
+
+
+def test_validation_preserves_python_rng_even_after_an_error(monkeypatch):
+    import random
+
+    model = TinyObjective()
+    original_forward = model.forward
+
+    def randomized_forward(**batch):
+        result = original_forward(**batch)
+        result["diff_loss"] = result["diff_loss"] * random.random()
+        return result
+
+    monkeypatch.setattr(model, "forward", randomized_forward)
+    trainer = Trainer(model, training_config())
+    loader = [{"text_inputs": torch.ones(1, 1)}]
+    before = random.getstate()
+    assert trainer.evaluate(loader) == trainer.evaluate(loader)
+    assert random.getstate() == before
+    with pytest.raises(FloatingPointError, match="nonfinite validation"):
+        trainer.evaluate([{"text_inputs": torch.full((1, 1), float("nan"))}])
+    assert random.getstate() == before
+    assert model.training
+
+
+@pytest.mark.parametrize("completed_epochs", [1, 2])
+def test_fit_resume_matches_frozen_to_unfrozen_curriculum(tiny_model, tmp_path, completed_epochs):
+    config = TrainingConfig(
+        stages=(TrainingStage(1, 5, False), TrainingStage(2, 15, True)),
+        precision="none", batch_size=2, accumulation_steps=2, warmup_steps=0,
+        gradient_checkpointing=False,
+    )
+    initial_model = copy.deepcopy(tiny_model)
+    train = CachedSpeechDataset(write_dataset(tmp_path, "train-speaker"))
+    validation = CachedSpeechDataset(write_dataset(tmp_path, "unseen-speaker"))
+    checkpoint_args = {"model_config": {"tiny": True}, "data_signature": {"train": "fixed"}}
+    seed_training(17)
+    uninterrupted = Trainer(tiny_model, config)
+    expected_history = list(uninterrupted.fit(train, validation, tmp_path / "full", **checkpoint_args))
+    expected_rng = torch.get_rng_state().clone()
+
+    seed_training(17)
+    interrupted = Trainer(copy.deepcopy(initial_model), config)
+    iterator = interrupted.fit(train, validation, tmp_path / "partial", **checkpoint_args)
+    for _ in range(completed_epochs):
+        next(iterator)
+    iterator.close()
+    resumed = Trainer(copy.deepcopy(initial_model), config)
+    resumed.restore(tmp_path / "partial/latest.ckpt", **checkpoint_args)
+    remaining = list(resumed.fit(train, validation, tmp_path / "resumed", **checkpoint_args))
+    assert remaining == expected_history[completed_epochs:]
+    assert resumed.completed_epochs == uninterrupted.completed_epochs == 3
+    assert resumed.global_step == uninterrupted.global_step == 3
+    assert resumed.stage_step == uninterrupted.stage_step == 2
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    assert all(parameter.requires_grad for parameter in resumed.model.causalAR.model.parameters())
+    for name, value in resumed.model.state_dict().items():
+        torch.testing.assert_close(value, uninterrupted.model.state_dict()[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("missing", ["pitch", "loudness", "duration_segments"])
+def test_real_model_rejects_partial_acoustic_controls(tiny_model, missing):
+    batch = collate_speech_examples([example(controls=True)])
+    del batch[missing]
+    with pytest.raises(ValueError, match="provided together"):
+        tiny_model(**batch)
+
+
+@pytest.mark.parametrize("setting,value,message", [
+    ("steps", 0, "positive integers"), ("steps", True, "positive integers"),
+    ("steps", 1.5, "positive integers"), ("max_seq_length", 0, "positive integers"),
+    ("max_seq_length", False, "positive integers"), ("max_seq_length", 2.5, "positive integers"),
+    ("cfg_strength", float("nan"), "finite and non-negative"),
+    ("cfg_strength", float("inf"), "finite and non-negative"),
+    ("cfg_strength", -1, "finite and non-negative"),
+])
+def test_sampling_rejects_invalid_arguments_before_encoding(tiny_model, monkeypatch, setting, value, message):
+    from ctrlspeech.models import ditar
+
+    def unexpected_encoding(*args, **kwargs):
+        pytest.fail("invalid sampling arguments must be rejected before encoding")
+
+    monkeypatch.setattr(ditar, "process_online", unexpected_encoding)
+    tiny_model.eval()
+    with pytest.raises(ValueError, match=message):
+        tiny_model.sample(torch.zeros(1, 800), torch.zeros(1, 192),
+                          torch.tensor([[2, 3, 4]]), torch.ones(1, 3, dtype=torch.bool),
+                          **{setting: value})

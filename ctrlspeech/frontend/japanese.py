@@ -8,6 +8,7 @@ implement the classic pyopenjtalk API.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -15,6 +16,7 @@ from typing import Any, Literal
 
 _SYMBOL_POS = {"記号", "補助記号"}
 _PAUSE_MARKERS = {"Pause", "Interrogative", "Exclamatory"}
+_PAUSE_PHONES = {"pau", "sil", "sp"}
 PitchLevel = Literal["Low", "High"]
 
 
@@ -82,13 +84,12 @@ class JapaneseFrontendResult:
 
     @property
     def accent_phrase_count(self) -> int:
-        phrase_ids = [
+        phrase_ids = {
             feature.accent_phrase_index
             for feature in self.phone_features
-            if not feature.is_pause
-        ]
-        return max(phrase_ids, default=-1) + 1
-
+            if not feature.is_pause and feature.phone != "unk"
+        }
+        return len(phrase_ids)
 
     def model_linguistic_features(self) -> dict[str, tuple]:
         """Return phone-aligned values consumed by DiTar.
@@ -115,7 +116,8 @@ class JapaneseFrontendResult:
                 feature.phrase_mora_count for feature in self.phone_features
             ),
             "valid": tuple(
-                not feature.is_pause for feature in self.phone_features
+                not feature.is_pause and feature.phone != "unk"
+                for feature in self.phone_features
             ),
         }
 
@@ -137,6 +139,13 @@ class JapaneseFrontend:
                     "Japanese preprocessing needs pyopenjtalk-plus. "
                     "Run 'uv sync --extra japanese'."
                 ) from exc
+            if not any(callable(getattr(pyopenjtalk, name, None)) for name in (
+                "g2p_mapping_prosody", "g2p_mapping",
+            )):
+                raise RuntimeError(
+                    "The installed pyopenjtalk lacks structured Japanese mappings. "
+                    "Install pyopenjtalk-plus with 'uv sync --extra japanese'."
+                )
             self._backend = pyopenjtalk
         return self._backend
 
@@ -164,6 +173,16 @@ class JapaneseFrontend:
                 include_fullcontext=include_fullcontext,
                 run_marine=run_marine,
             )
+        if hasattr(self.backend, "g2p_mapping"):
+            # The released 0.4.1.post9 API has structured morpheme mappings,
+            # but does not yet expose g2p_mapping_prosody. Do not silently
+            # discard its unknown-word flags, spans, or linguistic prosody.
+            return self._analyze_mapping(
+                text=text,
+                normalized=normalized,
+                include_fullcontext=include_fullcontext,
+                run_marine=run_marine,
+            )
         return self._analyze_legacy(
             text=text,
             normalized=normalized,
@@ -184,6 +203,100 @@ class JapaneseFrontend:
             run_marine=run_marine,
             normalize_mode="None",
         )
+        labels = ()
+        if include_fullcontext:
+            labels = tuple(self.backend.extract_fullcontext(
+                normalized, run_marine=run_marine,
+            ))
+        return self._result_from_mapping(text, normalized, mapping, labels)
+
+    def _analyze_mapping(
+        self,
+        *,
+        text: str,
+        normalized: str,
+        include_fullcontext: bool,
+        run_marine: bool,
+    ) -> JapaneseFrontendResult:
+        mapping = self.backend.g2p_mapping(
+            normalized, run_marine=run_marine, normalize_mode="None",
+        )
+        # Labels are required to compute prosody even when the caller does not
+        # want to retain them in the result. Match every pronounced phone so a
+        # changed reading cannot silently shift all following accent features.
+        labels = tuple(self.backend.extract_fullcontext(
+            normalized, run_marine=run_marine,
+        ))
+        speech_labels = []
+        for label in labels:
+            phone_match = re.search(r"-([^+]+)\+", label)
+            if phone_match is None:
+                raise ValueError("Invalid OpenJTalk full-context phone label")
+            phone = phone_match.group(1)
+            if phone in _PAUSE_PHONES:
+                continue
+            accent = re.search(r"/A:(-?\d+)\+(\d+)\+(\d+)/", label)
+            phrase = re.search(r"/F:([^/]+)/", label)
+            breath = re.search(r"/I:([^/]+)/", label)
+            if accent is None or phrase is None or breath is None:
+                raise ValueError("Invalid OpenJTalk full-context accent label")
+            relative, position, _ = map(int, accent.groups())
+            high = relative == 0 if position == 1 else relative <= 0
+            speech_labels.append((
+                phone, "High" if high else "Low",
+                (phrase.group(1), breath.group(1)),
+            ))
+
+        structured = []
+        label_index = 0
+        previous_phrase = None
+        for entry in mapping:
+            items = []
+            for phone in entry.get("phonemes", ()):
+                if phone == "sp":
+                    # MeCab whitespace has no HTS mora or acoustic pause. Keep
+                    # its mapping token without splitting the accent phrase.
+                    items.append({"kind": "Phoneme", "phoneme": phone, "pitch": None})
+                    continue
+                if phone in _PAUSE_PHONES:
+                    surface = str(entry.get("surface") or "")
+                    kind = (
+                        "Interrogative" if "?" in surface or "？" in surface
+                        else "Exclamatory" if "!" in surface or "！" in surface
+                        else "Pause"
+                    )
+                    items.append({"kind": kind})
+                    previous_phrase = None
+                    continue
+                if phone == "unk":
+                    items.append({"kind": "Phoneme", "phoneme": phone, "pitch": None})
+                    continue
+                if label_index >= len(speech_labels):
+                    raise RuntimeError("OpenJTalk mapping and full-context phones do not match")
+                label_phone, pitch, phrase = speech_labels[label_index]
+                if phone != label_phone and not (
+                    phone in set("aiueoAIUEO") and label_phone in set("aiueoAIUEO")
+                    and phone.lower() == label_phone.lower()
+                ):
+                    raise RuntimeError(
+                        "OpenJTalk mapping and full-context phones do not match: "
+                        f"{phone!r} vs {label_phone!r} at phone {label_index}"
+                    )
+                if previous_phrase is not None and phrase != previous_phrase:
+                    items.append({"kind": "AccentPhraseBoundary"})
+                items.append({"kind": "Phoneme", "phoneme": label_phone, "pitch": pitch})
+                previous_phrase = phrase
+                label_index += 1
+            structured.append({**entry, "phonemes": items})
+        if label_index != len(speech_labels):
+            raise RuntimeError("OpenJTalk mapping and full-context phones do not match")
+        return self._result_from_mapping(
+            text, normalized, structured, labels if include_fullcontext else (),
+        )
+
+    def _result_from_mapping(
+        self, text: str, normalized: str, mapping, labels: tuple[str, ...],
+    ) -> JapaneseFrontendResult:
 
         morphemes: list[JapaneseMorpheme] = []
         mfa_words: list[str] = []
@@ -205,22 +318,33 @@ class JapaneseFrontend:
                     if not phone:
                         continue
                     entry_phones.append(phone)
-                    is_pause = phone in {"pau", "sil", "sp"}
+                    is_pause = phone in _PAUSE_PHONES
+                    is_speech = not is_pause and phone != "unk"
+                    ends_phrase = phone in {"pau", "sil"}
+                    if ends_phrase and last_speech_feature is not None:
+                        raw_features[last_speech_feature] = replace(
+                            raw_features[last_speech_feature],
+                            is_accent_phrase_end=True,
+                        )
                     raw_features.append(
                         JapanesePhoneFeature(
                             phone=phone,
                             morpheme_index=morpheme_index,
                             accent_phrase_index=phrase_index,
-                            pitch=item.get("pitch"),
+                            pitch=item.get("pitch") if is_speech else None,
                             is_accent_phrase_start=(
-                                next_phrase_start and not is_pause
+                                next_phrase_start and is_speech
                             ),
                             is_pause=is_pause,
                         )
                     )
-                    if not is_pause:
+                    if is_speech:
                         last_speech_feature = len(raw_features) - 1
                         next_phrase_start = False
+                    elif ends_phrase and last_speech_feature is not None:
+                        phrase_index += 1
+                        next_phrase_start = True
+                        last_speech_feature = None
                     continue
 
                 if kind == "AccentPhraseBoundary":
@@ -229,7 +353,7 @@ class JapaneseFrontend:
                             raw_features[last_speech_feature],
                             is_accent_phrase_end=True,
                         )
-                    phrase_index += 1
+                        phrase_index += 1
                     next_phrase_start = True
                     last_speech_feature = None
                     continue
@@ -251,7 +375,8 @@ class JapaneseFrontend:
                             pause_kind=kind,
                         )
                     )
-                    phrase_index += 1
+                    if last_speech_feature is not None:
+                        phrase_index += 1
                     next_phrase_start = True
                     last_speech_feature = None
 
@@ -282,15 +407,6 @@ class JapaneseFrontend:
         phone_features = self._broadcast_phrase_metadata(raw_features, morphemes)
         phones = tuple(feature.phone for feature in phone_features)
 
-        labels: tuple[str, ...] = ()
-        if include_fullcontext:
-            labels = tuple(
-                self.backend.extract_fullcontext(
-                    normalized,
-                    run_marine=run_marine,
-                )
-            )
-
         return JapaneseFrontendResult(
             text=text,
             normalized_text=normalized,
@@ -308,7 +424,7 @@ class JapaneseFrontend:
     ) -> list[JapanesePhoneFeature]:
         phrase_to_morphemes: dict[int, list[int]] = {}
         for feature in features:
-            if feature.is_pause:
+            if feature.is_pause or feature.phone == "unk":
                 continue
             indices = phrase_to_morphemes.setdefault(
                 feature.accent_phrase_index,
@@ -329,20 +445,16 @@ class JapaneseFrontend:
             )
             metadata[phrase] = (max(0, first.accent), mora_count)
 
-        return [
-            replace(
-                feature,
-                accent_nucleus=metadata.get(
-                    feature.accent_phrase_index,
-                    (0, 0),
-                )[0],
-                phrase_mora_count=metadata.get(
-                    feature.accent_phrase_index,
-                    (0, 0),
-                )[1],
+        result = []
+        for feature in features:
+            accent, mora_count = (
+                (0, 0) if feature.is_pause or feature.phone == "unk"
+                else metadata.get(feature.accent_phrase_index, (0, 0))
             )
-            for feature in features
-        ]
+            result.append(replace(
+                feature, accent_nucleus=accent, phrase_mora_count=mora_count,
+            ))
+        return result
 
     def _analyze_legacy(
         self,
@@ -435,9 +547,9 @@ class JapaneseFrontend:
         next_start = True
         last_speech: int | None = None
         for phone in phones:
-            is_pause = phone in {"pau", "sil", "sp"}
+            is_pause = phone in _PAUSE_PHONES
             if is_pause:
-                if last_speech is not None:
+                if phone != "sp" and last_speech is not None:
                     features[last_speech] = replace(
                         features[last_speech],
                         is_accent_phrase_end=True,
@@ -448,12 +560,14 @@ class JapaneseFrontend:
                         morpheme_index=-1,
                         accent_phrase_index=phrase,
                         is_pause=True,
-                        is_accent_phrase_end=True,
+                        is_accent_phrase_end=phone != "sp",
                     )
                 )
-                phrase += 1
-                next_start = True
-                last_speech = None
+                if phone != "sp":
+                    if last_speech is not None:
+                        phrase += 1
+                    next_start = True
+                    last_speech = None
                 continue
             features.append(
                 JapanesePhoneFeature(
@@ -474,16 +588,8 @@ class JapaneseFrontend:
         return tuple(features)
 
     def phones(self, text: str) -> tuple[str, ...]:
-        normalized = self.normalize(text)
-        if not normalized:
-            raise ValueError("text must not be empty")
-        return tuple(
-            self.backend.g2p(
-                normalized,
-                kana=False,
-                join=False,
-            )
-        )
+        """Return the same canonical phone stream used for conditioning."""
+        return self.analyze(text, include_fullcontext=False).phones
 
     def to_mfa_transcript(self, text: str) -> str:
         result = self.analyze(text, include_fullcontext=False)

@@ -110,16 +110,86 @@ print(batch["linguistic_features"]["accent_pitch"].shape)
 Run the current test suite:
 
 ```bash
-uv run pytest
+CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run pytest
 ```
+
+For a CPU-only development environment (no model weights are downloaded):
+
+```bash
+uv venv
+uv pip install --torch-backend cpu -e ".[japanese]" --group dev "torch==2.11.0" "torchaudio==2.11.0"
+CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run --no-sync pytest -q
+```
+
+Keep Torch and TorchAudio on matching versions. On PowerShell, set
+`$env:CTRLSPEECH_TEST_ISOLATE_ONNX = "1"` before running the pytest command.
+The isolation setting prevents the native ONNX runtime from being imported:
+these tests cover real tiny Torch models, text-only OpenJTalk, and stubbed
+speaker/audio integration. They do not validate ONNX inference, real checkpoint
+compatibility, Japanese speech quality, or GPU performance. CI uses this same
+explicitly limited mode. Hub downloads and Hub telemetry are disabled in tests.
+
+The production package calls ONNX Runtime's official telemetry opt-out API before
+creating speech sessions. This call follows native import and is not a network
+sandbox; use a controlled runtime/network policy for sensitive recordings.
 
 The Panel/demo inference path requires a trained
 `japanese-lfm2-350m` checkpoint and intentionally does not fall back to the
-upstream Qwen checkpoints.
+upstream Qwen checkpoints. Japanese inference also requires canonical OpenJTalk
+phone timings: raw `japanese_mfa` annotations are deliberately rejected until an
+explicit reconciliation layer is supplied. The automatic MFA path is therefore not yet a turnkey Japanese alignment
+solution. The CLI can instead consume verified canonical annotations as
+described below; programmatic callers may also inject a canonical aligner. Native LFM
+semantic tokens can be supplied through `native_tokenizer` or a locally bundled
+`shared/tokenizer/`; no tokenizer is downloaded implicitly.
 
 For cached-feature training, staged LFM2 fine-tuning, dataset auditing and
 checkpoint resume, see [TRAINING.md](TRAINING.md) and
 [`configs/japanese-training.yaml`](configs/japanese-training.yaml).
+
+---
+
+## Japanese CLI with verified annotations
+
+A trained local checkpoint and its complete support assets are still required.
+Set `CTRLSPEECH_ASSETS` to that asset tree. You can bypass MFA when you already
+have verified OpenJTalk phone timings:
+
+```bash
+# Generate once; target timings describe the requested utterance.
+ctrlspeech --prompt-wav reference.wav --prompt-annotation reference.txt \
+  --target-annotation target.txt --out generated.wav
+
+# Edit a recording whose canonical timings have already been verified.
+ctrlspeech --audio recording.wav --annotation recording.txt \
+  --pitch-shift 2 --out edited.wav
+
+# Stretch an exact morpheme label from the recording's frontend analysis.
+ctrlspeech --audio recording.wav --annotation recording.txt \
+  --stretch-word 猫 --stretch-ratio 1.2 --out stretched.wav
+```
+
+Annotation files are UTF-8 with exactly four lines, without field labels:
+
+1. The original Japanese transcript, including its punctuation
+2. Space-separated canonical OpenJTalk phones, including any pause phones
+3. One start time in seconds per phone
+4. One end time in seconds per phone
+
+The phone sequence must exactly equal `JapaneseFrontend().analyze(text).phones`.
+Do not insert word separators (`|`), relabel MFA phones, guess durations, or
+reuse timings from another recording. Each phone needs a positive duration
+that occupies at least one 100 Hz control frame, with ordered, nonoverlapping
+boundaries inside the recording. For explicitly supplied annotations, timestamps
+refer to the original untrimmed audio; retain any leading silence in the times.
+Target annotations provide the requested target timeline and need no target WAV.
+
+Plain synthesis does not claim to know the generated waveform's actual phone
+timings. To edit that generated waveform, first obtain and verify its canonical
+annotation, then use `--audio --annotation`. The annotation CLI does not run MFA for post-edit verification; it saves the
+audio and explicitly reports that achieved duration is unverified. Measuring
+that duration still needs a canonical aligner. Existing raw-MFA workflows are not silently
+converted to OpenJTalk timings.
 
 ---
 
@@ -148,7 +218,7 @@ Audio is analysed at **100 frames per second** (16 kHz, hop 160).
   boundaries, accent nucleus and phrase mora count are separate conditions from
   measured/edited F0.
 - **Long form** — the current safety target is **60 s** / 6001 control frames,
-  with at most 620 AR steps.
+  with at most 600 AR steps.
 
 Stretching a word rescales its phoneme boundaries uniformly and shifts
 everything after it, so inter-word pauses keep their original length.
@@ -167,14 +237,15 @@ truncated.
 | `CTRLSPEECH_ASSETS` | Use a local asset directory; skips all downloads |
 | `CTRLSPEECH_HF_REPO` | Override the Hub repo id |
 | `CTRLSPEECH_MFA_CACHE` | Where MFA scratch files go (default `~/.cache/ctrlspeech/mfa`) |
-| `CTRLSPEECH_MFA_DICT` | Path to `english_us_arpa.dict` |
+| `CTRLSPEECH_MFA_DICT` | Legacy English aligner dictionary override; not used by `JapaneseMFAAligner` |
 | `CTRLSPEECH_DEMO_MODEL` | Which model the demo loads (default `japanese-lfm2-350m`) |
 
-MFA alignment uses a **sentence-level mini dictionary** built on the fly, and
-falls back to the full 200k-word lexicon only when a word is out of vocabulary.
-That is the difference between ~15 s and ~3 min per alignment; the fallback also
-needs about 500 MB of scratch space, so point `CTRLSPEECH_MFA_CACHE` at a disk
-with room.
+The Japanese MFA wrapper uses MFA’s Japanese tokenizer, dictionary and G2P.
+Each invocation has isolated scratch files and a configurable timeout
+(`JapaneseMFAAligner(timeout_seconds=600)` by default).
+Its phone inventory differs from OpenJTalk, so raw MFA intervals cannot be
+used as canonical Japanese controls without explicit reconciliation. The legacy
+English mini-dictionary optimization does not apply to the Japanese workflow.
 
 ---
 
@@ -197,12 +268,15 @@ demo/
 scripts/
   generate.py        CLI entry point for a checkout
 tests/
-  test_demo_flow.py  headless check of all three control paths
+  test_demo_controls.py  CPU-stub Panel controls and interrupted-upload checks
+  test_demo_flow.py      opt-in real GPU/checkpoint/MFA synthesis check
 ```
 
 Adding a demo example means dropping a wav plus a plain-text transcript into
-`demo/assets/` and listing it in `examples.json`; the phoneme timings are
-force-aligned on first use and cached next to the clip.
+`demo/assets/` and listing it with `"language": "ja"` in `examples.json`.
+Automatic example alignment still requires a compatible canonical aligner.
+For the built-in upload flow, supply the optional verified four-line annotation
+file to bypass MFA; its transcript fills the text field when left blank.
 
 ---
 

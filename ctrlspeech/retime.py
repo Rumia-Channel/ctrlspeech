@@ -22,8 +22,11 @@ MAX_DURATION_FRAMES = MAX_TIMELINE_FRAMES - 1
 
 
 def time_to_frame_index(time_sec, hop_length=256, sample_rate=24000):
-    """Convert time in seconds to frame index."""
-    return int(time_sec * sample_rate / hop_length)
+    """Round a nonnegative boundary to its nearest frame (ties round up)."""
+    if (not np.isfinite(time_sec) or time_sec < 0 or not np.isfinite(hop_length) or
+            not np.isfinite(sample_rate) or hop_length <= 0 or sample_rate <= 0):
+        raise ValueError("Times and frame rates must be finite with positive rates")
+    return int(np.floor(float(time_sec) * sample_rate / hop_length + 0.5 + 1e-9))
 
 
 def _resample_segment(data, old_n_frames, new_n_frames, method='cubic'):
@@ -69,7 +72,7 @@ def _retime_waveform_segment(
     waveform = np.asarray(waveform, dtype=float)
     if waveform.ndim != 1:
         raise ValueError("waveform_data must be one-dimensional")
-    if waveform_sample_rate <= 0:
+    if not np.isfinite(waveform_sample_rate) or waveform_sample_rate <= 0:
         raise ValueError("waveform_sample_rate must be positive")
 
     start_sample = int(round(float(start_sec) * waveform_sample_rate))
@@ -136,7 +139,9 @@ def retime_word_curves(
         raise ValueError(
             f"pitch/loudness length mismatch: {len(pitch)} != {len(loudness)}"
         )
-    if hop_length <= 0 or sample_rate <= 0:
+    if not np.all(np.isfinite(pitch)) or not np.all(np.isfinite(loudness)) or not len(pitch):
+        raise ValueError("pitch and loudness must be finite and nonempty")
+    if not np.isfinite(hop_length) or not np.isfinite(sample_rate) or hop_length <= 0 or sample_rate <= 0:
         raise ValueError("hop_length and sample_rate must be positive")
     if not np.isfinite(new_duration) or float(new_duration) <= 0:
         raise ValueError("new_duration must be a positive finite number")
@@ -147,7 +152,9 @@ def retime_word_curves(
         raise ValueError("word_data is empty")
     if not new_phonemes:
         raise ValueError("phoneme_data is required for word duration editing")
-    if not 0 <= int(word_idx) < len(new_words):
+    if isinstance(word_idx, (bool, np.bool_)) or not isinstance(word_idx, (int, np.integer)):
+        raise TypeError("word_idx must be an integer")
+    if not 0 <= word_idx < len(new_words):
         raise IndexError(f"word_idx {word_idx} is out of range")
     word_idx = int(word_idx)
 
@@ -160,9 +167,12 @@ def retime_word_curves(
 
     word_start = float(word["start"])
     word_end = float(word["end"])
-    if not np.isfinite(word_start) or not np.isfinite(word_end) or word_end <= word_start:
+    if not np.isfinite(word_start) or not np.isfinite(word_end) or word_start < 0 or word_end <= word_start:
         raise ValueError(f"word_data[{word_idx}] has invalid boundaries")
 
+    if any(isinstance(word[key], (bool, np.bool_)) or not isinstance(word[key], (int, np.integer))
+           for key in ("phone_start", "phone_end")):
+        raise ValueError("Word phone ranges must contain integer indices")
     phone_start = int(word["phone_start"])
     phone_end = int(word["phone_end"])
     if not (0 <= phone_start < phone_end <= len(new_phonemes)):
@@ -171,8 +181,8 @@ def retime_word_curves(
             f"[{phone_start}, {phone_end})"
         )
 
-    old_start_frame = int(round(word_start / frame_sec))
-    old_end_frame = int(round(word_end / frame_sec))
+    old_start_frame = time_to_frame_index(word_start, hop_length, sample_rate)
+    old_end_frame = time_to_frame_index(word_end, hop_length, sample_rate)
     old_word_frames = old_end_frame - old_start_frame
     if old_word_frames < 1:
         raise ValueError(f"word_data[{word_idx}] occupies fewer than one frame")
@@ -182,7 +192,11 @@ def retime_word_curves(
             f"[{old_start_frame}, {old_end_frame}) is outside a {len(pitch)}-frame curve"
         )
 
-    new_word_frames = int(round(float(new_duration) / frame_sec))
+    old_duration = word_end - word_start
+    # Shift by an integer number of frames so later curves and boundaries move
+    # together even when the aligner supplied sub-frame timestamps.
+    delta_frames = int(np.floor((float(new_duration) - old_duration) / frame_sec + 0.5 + 1e-9))
+    new_word_frames = old_word_frames + delta_frames
     if new_word_frames < 1:
         raise ValueError("new_duration is shorter than one frame")
     new_total_frames = len(pitch) - old_word_frames + new_word_frames
@@ -194,11 +208,12 @@ def retime_word_curves(
 
     # The UI and model both operate on the frame grid, so expose the duration
     # that can actually be represented rather than the unquantized request.
-    applied_duration = new_word_frames * frame_sec
-    old_duration = word_end - word_start
+    delta = delta_frames * frame_sec
+    applied_duration = old_duration + delta
+    if applied_duration <= 0:
+        raise ValueError("new_duration is shorter than one frame")
     scale = applied_duration / old_duration
-    new_word_end = word_start + applied_duration
-    delta = new_word_end - word_end
+    new_word_end = word_end + delta
 
     # Scale every boundary inside the selected word around its fixed start.
     # Identical neighbouring boundaries remain identical under this transform.
@@ -208,8 +223,9 @@ def retime_word_curves(
             raise ValueError(f"phoneme_data[{phone_idx}] must have label/start/end")
         start = float(phone[1])
         end = float(phone[2])
-        if end <= start:
-            raise ValueError(f"phoneme_data[{phone_idx}] has invalid boundaries")
+        if (not np.isfinite(start) or not np.isfinite(end) or end <= start or
+                start < word_start - 1e-6 or end > word_end + 1e-6):
+            raise ValueError(f"phoneme_data[{phone_idx}] has invalid boundaries for the selected word")
         phone[1] = word_start + (start - word_start) * scale
         phone[2] = word_start + (end - word_start) * scale
 
@@ -231,9 +247,19 @@ def retime_word_curves(
     # Validate every phone, not just the selected word. Zero-frame phones are
     # invalid; the upper bound is now the one-minute timeline safety ceiling,
     # not a lookup-table index.
+    previous_end = 0.0
     for phone_idx, phone in enumerate(new_phonemes):
-        start_frame = int(round(float(phone[1]) / frame_sec))
-        end_frame = int(round(float(phone[2]) / frame_sec))
+        if len(phone) < 3:
+            raise ValueError(f"phoneme_data[{phone_idx}] must have label/start/end")
+        start, end = float(phone[1]), float(phone[2])
+        if (not np.isfinite(start) or not np.isfinite(end) or
+                start < previous_end - 1e-6):
+            raise ValueError("Phoneme boundaries must be finite, ordered and within the edited timeline")
+        previous_end = end
+        start_frame = time_to_frame_index(start, hop_length, sample_rate)
+        end_frame = time_to_frame_index(end, hop_length, sample_rate)
+        if start_frame < 0 or end_frame > new_total_frames:
+            raise ValueError("Phoneme boundaries fall outside the edited control curve")
         duration_frames = end_frame - start_frame
         if not 1 <= duration_frames <= MAX_DURATION_FRAMES:
             raise ValueError(

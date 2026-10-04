@@ -24,8 +24,12 @@ class TrainingStage:
     backbone_lr: float = 1e-5
 
     def __post_init__(self):
-        if self.epochs < 1 or not 0 < self.max_seconds <= 60:
-            raise ValueError("stage epochs must be positive and max_seconds must be in (0, 60]")
+        if type(self.epochs) is not int or self.epochs < 1:
+            raise ValueError("stage epochs must be a positive integer")
+        if type(self.train_backbone) is not bool:
+            raise ValueError("train_backbone must be bool")
+        if type(self.max_seconds) not in (int, float) or not 0 < self.max_seconds <= 60:
+            raise ValueError("stage max_seconds must be in (0, 60]")
         if not math.isfinite(self.adapter_lr) or self.adapter_lr <= 0:
             raise ValueError("adapter_lr must be finite and positive")
         if not math.isfinite(self.backbone_lr) or self.backbone_lr <= 0:
@@ -53,10 +57,16 @@ class TrainingConfig:
     })
 
     def __post_init__(self):
-        if not self.stages:
-            raise ValueError("at least one training stage is required")
-        if self.batch_size < 1 or self.accumulation_steps < 1 or self.num_workers < 0:
-            raise ValueError("invalid batch size, accumulation steps or worker count")
+        if not self.stages or any(not isinstance(stage, TrainingStage) for stage in self.stages):
+            raise ValueError("at least one valid training stage is required")
+        for name, minimum in (("batch_size", 1), ("accumulation_steps", 1), ("num_workers", 0), ("warmup_steps", 0)):
+            value = getattr(self, name)
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if type(self.seed) is not int or type(self.validation_seed) is not int:
+            raise ValueError("seed and validation_seed must be integers")
+        if type(self.gradient_checkpointing) is not bool:
+            raise ValueError("gradient_checkpointing must be bool")
         if self.precision not in {"none", "bf16", "fp16"}:
             raise ValueError("precision must be none, bf16 or fp16")
         if self.warmup_steps < 0 or not 0 <= self.min_lr_ratio <= 1:
@@ -192,10 +202,16 @@ class Trainer:
             totals["loss"] = totals.get("loss", 0.0) + float(loss.detach()) * count
             if (index + 1) % self.config.accumulation_steps == 0 or index + 1 == batch_count:
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    [parameter for parameter in self.model.parameters() if parameter.requires_grad],
-                    self.config.max_grad_norm, error_if_nonfinite=True,
-                )
+                try:
+                    torch.nn.utils.clip_grad_norm_(
+                        [parameter for parameter in self.model.parameters() if parameter.requires_grad],
+                        self.config.max_grad_norm, error_if_nonfinite=True,
+                    )
+                except RuntimeError:
+                    # Do not leave a partially accumulated/nonfinite gradient
+                    # attached to the model after a rejected optimizer update.
+                    self.optimizer.zero_grad(set_to_none=True)
+                    raise
                 set_stage_learning_rate(self.optimizer, stage, self.stage_step, total_stage_steps, self.config)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -208,11 +224,13 @@ class Trainer:
     def evaluate(self, loader):
         """Use fixed flow noise/time, restoring training RNG and model mode."""
         mode = self.model.training
+        python_rng = random.getstate()
         devices = [self.device.index or 0] if self.device.type == "cuda" else []
         totals, samples = {}, 0
         try:
             self.model.eval()
             with torch.random.fork_rng(devices=devices):
+                random.seed(self.config.validation_seed)
                 # Seed only devices whose RNG is preserved by fork_rng.
                 torch.random.default_generator.manual_seed(self.config.validation_seed)
                 if devices:
@@ -230,6 +248,7 @@ class Trainer:
                             raise FloatingPointError(f"nonfinite validation metric: {name}")
                         totals[name] = totals.get(name, 0.0) + float(value) * count
         finally:
+            random.setstate(python_rng)
             self.model.train(mode)
         if not samples:
             raise ValueError("validation loader is empty")

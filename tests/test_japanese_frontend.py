@@ -108,3 +108,11 @@ def test_japanese_phone_inventory_rejects_unknown_tokens():
     )
     with pytest.raises(ValueError, match="Unsupported CtrlSpeech-JA phone"):
         validate_japanese_phones(["not-a-phone"])
+
+
+def test_production_backend_does_not_silently_discard_structured_features(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pyopenjtalk", FakeOpenJTalk())
+    with pytest.raises(RuntimeError, match="lacks structured Japanese mappings"):
+        JapaneseFrontend().analyze("今日は、いい天気。")

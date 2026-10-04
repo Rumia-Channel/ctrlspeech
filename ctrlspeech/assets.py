@@ -59,14 +59,14 @@ class Assets:
 
 
 def _layout(root, spec):
-    root = Path(root)
+    root = Path(root).expanduser().resolve()
     folder = root / spec.folder
     weights = folder / "model.safetensors"
-    if not weights.exists():
+    if not weights.is_file():
         # Accept the raw Lightning export too, so a local checkpoint directory
         # works before anything has been converted.
         legacy = folder / "model.ckpt"
-        if legacy.exists():
+        if legacy.is_file():
             weights = legacy
     return Assets(
         spec=spec,
@@ -86,10 +86,11 @@ def _verify(assets):
             assets.config_path,
             assets.weights_path,
             assets.svae_dir / "metainfo.json",
+            assets.svae_dir / "dac" / "ema_state_dict.pth",
             assets.vocab_path,
             assets.campplus_path,
         )
-        if not path.exists()
+        if not path.is_file()
     ]
     if missing:
         raise FileNotFoundError(
@@ -108,7 +109,7 @@ def download_assets(
     """Return local paths for ``model``, downloading from the Hub if needed.
 
     Only the requested model folder plus the shared files are fetched, so
-    picking ``control-150m`` does not pull the 600M weights.
+    unrelated checkpoints are never downloaded.
     """
     if model not in MODELS:
         raise ValueError(
@@ -120,7 +121,7 @@ def download_assets(
     if local_root:
         return _verify(_layout(local_root, spec))
 
-    resolved_repo_id = repo_id or DEFAULT_REPO_ID
+    resolved_repo_id = repo_id or os.environ.get("CTRLSPEECH_HF_REPO")
     if not resolved_repo_id:
         raise RuntimeError(
             "No public CtrlSpeech-JA checkpoint is configured yet. "

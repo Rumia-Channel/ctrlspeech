@@ -1,3 +1,5 @@
+import math
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -440,7 +442,10 @@ class DiTar(nn.Module):
                 ).to(text_embeds.dtype)
             )
 
-        if duration_segments is not None and pitch is not None and loudness is not None:
+        controls = (duration_segments, pitch, loudness)
+        if any(value is not None for value in controls) and not all(value is not None for value in controls):
+            raise ValueError("duration_segments, pitch and loudness must be provided together")
+        if all(value is not None for value in controls):
             pitch_embeds, loudness_embeds, duration_embeds = self.get_pitch_loudness_embed(
                 pitch, loudness, duration_segments
             )
@@ -632,8 +637,11 @@ class DiTar(nn.Module):
             raise RuntimeError("call model.eval() before sampling")
         if prompt_audio.shape[0] != 1:
             raise ValueError("sampling currently supports a batch size of one")
-        if steps < 1 or max_seq_length < 1:
-            raise ValueError("steps and max_seq_length must be positive")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1
+               for value in (steps, max_seq_length)):
+            raise ValueError("steps and max_seq_length must be positive integers")
+        if not math.isfinite(cfg_strength) or cfg_strength < 0:
+            raise ValueError("cfg_strength must be finite and non-negative")
         def odeint_fn(t, x):
             time_embed = self.time_embedding(t.unsqueeze(0))
             # Apply speaker embedding processing (same as forward)

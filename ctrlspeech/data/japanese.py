@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Mapping
 
 import torch
@@ -16,12 +17,39 @@ from ..frontend import (
 )
 
 
+_LINGUISTIC_FIELDS = frozenset({
+    "accent_pitch", "phrase_boundary", "accent_nucleus", "phrase_mora_count", "valid",
+})
+
+
+def _validate_ids(values, name: str) -> None:
+    if any(isinstance(value, bool) or not isinstance(value, Integral) or value < 0
+           for value in values):
+        raise ValueError(f"{name} must contain non-negative integer IDs")
+
+
+def _phone_vocab(phone_vocab: Mapping[str, int] | None) -> dict[str, int]:
+    # An explicitly empty mapping is an error, not a request for defaults.
+    vocab = dict(JAPANESE_PHONE_TO_ID if phone_vocab is None else phone_vocab)
+    _validate_ids(vocab.values(), "phone vocabulary")
+    if len(set(vocab.values())) != len(vocab):
+        raise ValueError("phone vocabulary IDs must be unique")
+    return vocab
+
+
 @dataclass(frozen=True)
 class JapaneseTextEncoding:
     """One Japanese utterance after linguistic analysis."""
 
     result: JapaneseFrontendResult
     phone_ids: tuple[int, ...]
+
+    def __post_init__(self):
+        if len(self.phone_ids) != len(self.result.phones):
+            raise ValueError("phone_ids must have one ID per frontend phone")
+        if tuple(feature.phone for feature in self.result.phone_features) != self.result.phones:
+            raise ValueError("linguistic features must align with the frontend phones")
+        _validate_ids(self.phone_ids, "phone_ids")
 
     @property
     def phones(self) -> tuple[str, ...]:
@@ -44,6 +72,18 @@ class JapaneseSequenceEncoding:
 
     def __post_init__(self):
         length = len(self.phone_ids)
+        _validate_ids(self.phone_ids, "phone_ids")
+        _validate_ids(self.native_text_ids, "native_text_ids")
+        missing = _LINGUISTIC_FIELDS.difference(self.linguistic_features)
+        if missing:
+            raise ValueError("linguistic_features is missing: " + ", ".join(sorted(missing)))
+        prompt_length = len(self.prompt.phone_ids)
+        if (
+            length != prompt_length + 1 + len(self.target.phone_ids)
+            or self.phone_ids[:prompt_length] != self.prompt.phone_ids
+            or self.phone_ids[prompt_length + 1:] != self.target.phone_ids
+        ):
+            raise ValueError("phone_ids must contain prompt, separator, and target in order")
         for name, values in self.linguistic_features.items():
             if len(values) != length:
                 raise ValueError(
@@ -63,7 +103,7 @@ def encode_japanese_text(
     """Analyze text and map canonical OpenJTalk phones to model IDs."""
 
     frontend = frontend or JapaneseFrontend()
-    vocab = dict(phone_vocab or JAPANESE_PHONE_TO_ID)
+    vocab = _phone_vocab(phone_vocab)
     result = frontend.analyze(text, run_marine=run_marine)
 
     unknown_surfaces = [
@@ -78,6 +118,8 @@ def encode_japanese_text(
         )
 
     phones = validate_japanese_phones(result.phones, allow_separator=False)
+    if not any(phone not in {"pau", "sil", "sp"} for phone in phones):
+        raise ValueError("text did not contain any pronounceable Japanese phones")
     if "unk" in phones and not allow_unknown:
         raise ValueError(
             "pyopenjtalk-plus emitted an unknown phone; fix the reading or "
@@ -103,9 +145,13 @@ def join_prompt_target(
 ) -> JapaneseSequenceEncoding:
     """Join prompt and target with the canonical phone separator token."""
 
-    vocab = dict(phone_vocab or JAPANESE_PHONE_TO_ID)
+    vocab = _phone_vocab(phone_vocab)
     if "|" not in vocab:
         raise ValueError("phone vocabulary must contain the '|' separator")
+    for encoding in (prompt, target):
+        if any(vocab.get(phone) != phone_id
+               for phone, phone_id in zip(encoding.phones, encoding.phone_ids)):
+            raise ValueError("prompt and target must use the same phone vocabulary as the separator")
 
     phone_ids = (
         prompt.phone_ids
@@ -166,18 +212,22 @@ def encode_japanese_pair(
         add_special_tokens=True,
         return_attention_mask=False,
     )
-    native_ids = encoded["input_ids"]
-    if native_ids and isinstance(native_ids[0], list):
-        if len(native_ids) != 1:
-            raise ValueError("native tokenizer returned an unexpected batch")
+    native_ids = torch.as_tensor(encoded["input_ids"])
+    if native_ids.ndim == 2 and native_ids.shape[0] == 1:
         native_ids = native_ids[0]
+    if native_ids.ndim != 1:
+        raise ValueError("native tokenizer returned an unexpected batch or token shape")
+    native_ids = native_ids.tolist()
+    if not native_ids:
+        raise ValueError("native tokenizer returned no tokens")
+    _validate_ids(native_ids, "native tokenizer input_ids")
 
     return JapaneseSequenceEncoding(
         prompt=sequence.prompt,
         target=sequence.target,
         phone_ids=sequence.phone_ids,
         linguistic_features=sequence.linguistic_features,
-        native_text_ids=tuple(int(token_id) for token_id in native_ids),
+        native_text_ids=tuple(native_ids),
     )
 
 
