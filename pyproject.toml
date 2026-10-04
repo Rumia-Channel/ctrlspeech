@@ -64,3 +64,7 @@ include = ["ctrlspeech*"]
 
 [tool.setuptools.package-data]
 ctrlspeech = ["py.typed"]
+
+[tool.pytest.ini_options]
+# Include checkout-only demo modules for both `pytest` and `python -m pytest`.
+pythonpath = ["."]
