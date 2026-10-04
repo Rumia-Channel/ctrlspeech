@@ -2,9 +2,9 @@ name: Japanese LFM2 CI
 
 on:
   push:
-    branches: [japanese]
+    branches: [japanese, "refine-japanese*"]
   pull_request:
-    branches: [main]
+    branches: [main, japanese]
   workflow_dispatch:
 
 jobs:
@@ -25,11 +25,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Sync environment
-        run: uv sync --extra japanese --group dev
+      - name: Create CPU test environment
+        run: uv venv
 
-      - name: Import smoke test
-        run: uv run python -c "import ctrlspeech; import transformers; print(transformers.__version__)"
+      - name: Install CPU test dependencies
+        run: uv pip install --torch-backend cpu -e ".[japanese]" --group dev "torch==2.11.0" "torchaudio==2.11.0"
 
-      - name: Run tests
-        run: uv run pytest -q
+      - name: Compile Python sources
+        run: uv run --no-sync python -m compileall -q ctrlspeech demo tests
+
+      - name: CPU regressions (native ONNX runtime isolated)
+        env:
+          CTRLSPEECH_TEST_ISOLATE_ONNX: "1"
+        run: uv run --no-sync pytest -q

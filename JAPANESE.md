@@ -28,7 +28,10 @@ The local model config is `configs/japanese-lfm2-350m.yaml`.
 Japanese preprocessing uses `pyopenjtalk-plus` (distribution name) through the
 compatible `import pyopenjtalk` module name.
 
-The production frontend prefers `g2p_mapping_prosody()`, retaining:
+The production frontend prefers `g2p_mapping_prosody()` when available. The
+released `pyopenjtalk-plus==0.4.1.post9` API exposes `g2p_mapping()` instead,
+so the compatibility path combines its morpheme mapping with OpenJTalk
+full-context labels. Both paths retain:
 
 - canonical OpenJTalk phone sequence
 - morpheme -> phone mapping
@@ -117,10 +120,14 @@ environment.
 ```bash
 uv python install 3.11
 uv sync --extra japanese --group dev
-uv run pytest
+CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run pytest
 ```
 
-CI runs the same uv setup on Windows and Linux.
+CI runs CPU-only Torch/TorchAudio tests on Windows and Linux with the native
+ONNX runtime explicitly isolated. Coverage includes real released-API text-only
+frontend checks, tiny-model training/backward/resume, and stubbed Panel control
+flows. ONNX inference and synthesis quality remain outside these checks. See the
+CPU-only environment command in README.md.
 
 Montreal Forced Aligner remains an external command-line dependency because its
 Kaldi runtime is not self-contained through PyPI on every platform.
@@ -134,7 +141,13 @@ mfa model download g2p japanese_mfa
 ```
 
 MFA is a timing estimator. OpenJTalk/pyopenjtalk-plus remains the canonical
-linguistic phone/accent source.
+linguistic phone/accent source. Raw `japanese_mfa` phones use a different
+inventory; the inference pipeline rejects mismatched annotations instead of
+assigning their timings to unrelated phones. Until reconciliation is implemented,
+use the canonical-annotation CLI described in README.md, or inject an aligner
+that returns exactly that phone sequence. Installing MFA alone does not complete
+this integration. Explicit annotations preserve the original untrimmed waveform
+time base; generated-waveform timings are never inferred from a target template.
 
 ## Checkpoint status
 

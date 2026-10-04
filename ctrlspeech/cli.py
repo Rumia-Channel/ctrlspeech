@@ -1,30 +1,23 @@
-"""Command-line CtrlSpeech: synthesise a baseline, then optionally control it.
+"""Japanese CtrlSpeech: synthesize or edit with canonical OpenJTalk timings.
 
-Two ways to get a baseline:
+Plain generation from a voice reference and canonical four-line annotations::
 
-  ``--prompt-wav`` + ``--target-wav``
-      Synthesise the target sentence in the prompt's voice. The target recording
-      supplies the reference timing for its own text; it is not used for voice.
+    ctrlspeech --prompt-wav prompt.wav --prompt-annotation prompt.txt \
+        --target-annotation target.txt --out baseline.wav
 
-  ``--audio``
-      Adopt an existing recording as the baseline. No first synthesis happens,
-      so the clip's own pitch, loudness and word timings become the starting
-      point and whatever you do not edit is reused verbatim.
+Adopt a recording with canonical timings, then edit pitch or a word duration::
 
-Any of the three controls can then be applied, and the model resynthesises.
-Installed as the ``ctrlspeech`` command; from a checkout, run
-``python scripts/generate.py`` instead.
+    ctrlspeech --audio clip.wav --annotation clip.txt \
+        --pitch-shift 5 --out edited.wav
 
-    # +5 semitones over the whole utterance, keeping timing and loudness
-    ctrlspeech --audio clip.wav --transcript-text "..." \\
-        --pitch-shift 5 --out out.wav
+    ctrlspeech --audio clip.wav --annotation clip.txt \
+        --stretch-word 今日 --stretch-ratio 2 --out edited.wav
 
-    # stretch one word to twice its length
-    ctrlspeech --audio clip.wav --transcript-text "..." \\
-        --stretch-word dreams --stretch-ratio 2 --out out.wav
-
-Transcripts may be passed inline (``--transcript-text``) or as a file
-(``--transcript``). Every path that needs phoneme boundaries goes through MFA.
+Annotation lines are transcript / phones / starts / ends. Times use seconds
+against the full untrimmed waveform. The canonical phone sequence must match
+pyopenjtalk-plus exactly. Raw Japanese MFA phones cannot be used without
+explicit reconciliation. A generated waveform needs its own reconciled timing
+annotation before a controlled second pass; input timings are not reused.
 """
 
 import argparse
@@ -32,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .align import annotate_audio, normalize_word
+from .align import annotate_audio, normalize_word, read_four_line_annotation
 from .assets import MODELS
 from .pipeline import (
     HOP_LENGTH,
@@ -44,11 +37,11 @@ from .pipeline import (
 from .retime import retime_word_curves
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--model", default="control-600m", choices=sorted(MODELS))
+    p.add_argument("--model", default="japanese-lfm2-350m", choices=sorted(MODELS))
     p.add_argument("--device", default=None, help="cuda, cuda:1, cpu (default: auto)")
     p.add_argument("--out", type=Path, required=True)
 
@@ -56,19 +49,26 @@ def parse_args():
     src.add_argument("--audio", type=Path, help="Clip to adopt as the baseline.")
     src.add_argument("--transcript", type=Path, help="Text file for --audio.")
     src.add_argument("--transcript-text", help="Inline text for --audio.")
+    src.add_argument("--annotation", type=Path,
+                     help="Canonical four-line annotation for the full untrimmed --audio; skips MFA.")
 
     syn = p.add_argument_group("baseline by synthesis")
     syn.add_argument("--prompt-wav", type=Path, help="Voice reference.")
     syn.add_argument("--prompt-text", type=Path, help="Transcript of --prompt-wav.")
     syn.add_argument("--target-wav", type=Path, help="Timing reference for the text.")
     syn.add_argument("--target-text", type=Path, help="Transcript of --target-wav.")
+    syn.add_argument("--prompt-annotation", type=Path,
+                     help="Canonical four-line annotation timed against the full untrimmed prompt.")
+    syn.add_argument("--target-annotation", type=Path,
+                     help="Canonical four-line target annotation; replaces --target-wav/--target-text.")
 
     ctl = p.add_argument_group("controls (applied to the baseline)")
     ctl.add_argument("--pitch-shift", type=float, default=0.0, help="Semitones.")
     ctl.add_argument("--loudness-shift", type=float, default=0.0, help="dB.")
     ctl.add_argument("--stretch-word", help="Word whose duration to change.")
-    ctl.add_argument("--stretch-ratio", type=float, help="Multiplier, e.g. 2.0.")
-    ctl.add_argument("--stretch-seconds", type=float, help="Absolute target length.")
+    duration = ctl.add_mutually_exclusive_group()
+    duration.add_argument("--stretch-ratio", type=float, help="Multiplier, e.g. 2.0.")
+    duration.add_argument("--stretch-seconds", type=float, help="Absolute target length.")
 
     p.add_argument("--steps", type=int, default=32, help="Flow-matching ODE steps.")
     p.add_argument("--cfg-strength", type=float, default=1.5)
@@ -76,15 +76,56 @@ def parse_args():
         "--save-baseline", type=Path,
         help="Also write the un-edited baseline audio here.",
     )
-    return p.parse_args()
+    args = p.parse_args(argv)
+    has_recording = args.audio is not None
+    synthesis_args = (args.prompt_wav, args.prompt_text, args.target_wav, args.target_text,
+                      args.prompt_annotation, args.target_annotation)
+    if has_recording:
+        if any(value is not None for value in synthesis_args):
+            p.error("--audio cannot be combined with synthesis arguments")
+        sources = (args.transcript, args.transcript_text, args.annotation)
+        if sum(value is not None for value in sources) != 1:
+            p.error("--audio needs exactly one of --transcript, --transcript-text or --annotation")
+    else:
+        if args.prompt_wav is None:
+            p.error("Pass --audio or --prompt-wav")
+        if (args.prompt_text is None) == (args.prompt_annotation is None):
+            p.error("--prompt-wav needs exactly one of --prompt-text or --prompt-annotation")
+        if args.target_annotation is not None:
+            if args.target_wav is not None or args.target_text is not None:
+                p.error("--target-annotation replaces --target-wav and --target-text")
+        elif args.target_wav is None or args.target_text is None:
+            p.error("Supply --target-annotation or both --target-wav and --target-text")
+        if args.transcript is not None or args.transcript_text is not None or args.annotation is not None:
+            p.error("--transcript, --transcript-text and --annotation are only used with --audio")
+    if args.steps < 1:
+        p.error("--steps must be positive")
+    for name in ("pitch_shift", "loudness_shift", "cfg_strength"):
+        if not np.isfinite(getattr(args, name)):
+            p.error(f"--{name.replace('_', '-')} must be finite")
+    if args.cfg_strength < 0:
+        p.error("--cfg-strength must be nonnegative")
+    duration_value = args.stretch_seconds if args.stretch_seconds is not None else args.stretch_ratio
+    if bool(args.stretch_word) != (duration_value is not None):
+        p.error("--stretch-word needs exactly one of --stretch-ratio or --stretch-seconds")
+    if duration_value is not None and (not np.isfinite(duration_value) or duration_value <= 0):
+        p.error("The requested word duration/ratio must be positive and finite")
+    if not has_recording and (args.pitch_shift or args.loudness_shift or args.stretch_word):
+        p.error("Synthesis currently supports plain generation only. Reconcile timings for "
+                "the generated audio, then edit it using --audio and --annotation.")
+    return args
 
 
 def read_transcript(path, inline, what):
-    if inline:
-        return " ".join(inline.split())
-    if path:
-        return " ".join(Path(path).read_text(encoding="utf-8").split())
-    raise SystemExit(f"A transcript is required for {what}.")
+    if inline is not None:
+        transcript = " ".join(inline.split())
+    elif path is not None:
+        transcript = " ".join(Path(path).read_text(encoding="utf-8").split())
+    else:
+        transcript = ""
+    if not transcript:
+        raise SystemExit(f"A nonempty transcript is required for {what}.")
+    return transcript
 
 
 def find_word(words, wanted):
@@ -96,8 +137,8 @@ def find_word(words, wanted):
     raise SystemExit(f"Word {wanted!r} is not in the utterance. Words: {labels}")
 
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
 
     has_recording = args.audio is not None
     has_synthesis = args.prompt_wav is not None
@@ -109,32 +150,40 @@ def main():
     )
     if wants_control and not MODELS[args.model].controllable:
         raise SystemExit(
-            f"{args.model} has no prosody embeddings; use a control-* model to "
+            f"{args.model} has no prosody embeddings; use a controllable Japanese checkpoint to "
             "apply pitch / loudness / duration edits."
         )
 
+    # Validate cheap user inputs before loading large assets or invoking MFA.
+    if has_recording:
+        audio_annotation = read_four_line_annotation(args.annotation) if args.annotation else None
+        transcript = read_transcript(args.transcript,
+                                     audio_annotation["words"] if audio_annotation else args.transcript_text,
+                                     "--audio")
+    else:
+        prompt_annotation = read_four_line_annotation(args.prompt_annotation) if args.prompt_annotation else None
+        target_annotation = read_four_line_annotation(args.target_annotation) if args.target_annotation else None
+        prompt_text = read_transcript(args.prompt_text, prompt_annotation["words"] if prompt_annotation else None, "--prompt-wav")
+        target_text = read_transcript(args.target_text, target_annotation["words"] if target_annotation else None, "target")
     print(f"Loading {args.model} …", flush=True)
     tts = CtrlSpeech.from_pretrained(args.model, device=args.device, progress=True)
 
     if has_recording:
-        transcript = read_transcript(args.transcript, args.transcript_text, "--audio")
-        print(f"Adopting {args.audio.name} as the baseline (aligning with MFA) …")
+        print(f"Adopting {args.audio.name} as the baseline …")
         baseline = tts.from_audio(
-            args.audio, transcript, steps=args.steps, cfg_strength=args.cfg_strength
+            args.audio, transcript, steps=args.steps, cfg_strength=args.cfg_strength,
+            annotation=audio_annotation,
         )
     else:
-        if args.target_wav is None:
-            raise SystemExit("--target-wav is required alongside --prompt-wav.")
-        prompt_text = read_transcript(args.prompt_text, None, "--prompt-wav")
-        target_text = read_transcript(args.target_text, None, "--target-wav")
-        print("Aligning the prompt and target references with MFA …")
-        prompt_annotation = annotate_audio(args.prompt_wav, prompt_text, tts.aligner)
-        target_annotation = annotate_audio(args.target_wav, target_text, tts.aligner)
+        if prompt_annotation is None:
+            prompt_annotation = annotate_audio(args.prompt_wav, prompt_text, tts.aligner)
+        if target_annotation is None:
+            target_annotation = annotate_audio(args.target_wav, target_text, tts.aligner)
         print("Generating the baseline …")
         baseline = tts.generate(
             args.prompt_wav, prompt_annotation, target_annotation,
             steps=args.steps, cfg_strength=args.cfg_strength,
-            align=wants_control,
+            align=wants_control, trim_prompt=args.prompt_annotation is None,
         )
 
     print(
@@ -163,7 +212,7 @@ def main():
 
     if args.stretch_word:
         if not baseline.word_data:
-            raise SystemExit("Duration editing needs an MFA alignment.")
+            raise SystemExit("Duration editing needs canonical phone timings.")
         idx = find_word(baseline.word_data, args.stretch_word)
         word = baseline.word_data[idx]
         old = float(word["end"] - word["start"])
@@ -190,15 +239,24 @@ def main():
     result.save(args.out)
     print(f"Wrote {args.out} ({result.duration:.2f}s)")
 
-    if args.stretch_word:
-        achieved = tts.align(result.audio, baseline.target_words)
-        got = achieved["word_data"][idx]
-        print(
-            f"Verified: {got['label']} lasts {got['end'] - got['start']:.2f}s "
-            f"(requested {summary['new_duration']:.2f}s)"
-        )
+    if args.stretch_word and args.annotation is not None:
+        print("Audio saved; achieved duration is unverified. Canonical annotations bypass MFA; "
+              "new output needs independently reconciled timings for verification.")
+    elif args.stretch_word:
+        try:
+            achieved = tts.align(result.audio, baseline.target_words, baseline.target_phones)
+            got = achieved["word_data"][idx]
+            print(
+                f"Verified: {got['label']} lasts {got['end'] - got['start']:.2f}s "
+                f"(requested {summary['new_duration']:.2f}s)"
+            )
+        except (RuntimeError, ValueError, IndexError) as exc:
+            print(f"Audio saved; duration verification unavailable: {exc}")
     elif args.pitch_shift:
-        voiced = lambda c: float(np.mean([v for v in c if v > 1]) or 0)
+        def voiced(curve):
+            values = np.asarray(curve, dtype=float)
+            values = values[values > 0]
+            return float(values.mean()) if values.size else 0.0
         print(
             f"Voiced pitch mean: {voiced(baseline.gen_f0):.1f} -> "
             f"{voiced(result.pitch):.1f} bins (requested {voiced(pitch):.1f})"

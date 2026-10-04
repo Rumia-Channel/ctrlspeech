@@ -139,7 +139,7 @@ class PositiveScalarConditioner(nn.Module):
 
     def __init__(self, dim: int, hidden_dim: int = 256, max_reference: float = 6000):
         super().__init__()
-        if max_reference <= 0:
+        if not math.isfinite(max_reference) or max_reference <= 0:
             raise ValueError("max_reference must be positive")
         self.log_reference = math.log1p(float(max_reference))
         self.net = nn.Sequential(
@@ -151,7 +151,9 @@ class PositiveScalarConditioner(nn.Module):
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         dtype = self.net[0].weight.dtype
-        values = values.to(dtype=dtype).clamp_min(0)
+        values = values.to(dtype=dtype)
+        if not torch.isfinite(values).all() or (values < 0).any():
+            raise ValueError("scalar conditions must be finite and non-negative")
         scaled = torch.log1p(values) / self.log_reference
         return self.net(scaled.unsqueeze(-1))
 

@@ -1,5 +1,12 @@
 """CtrlSpeech — controllable expressive TTS with coarse-to-fine latent control."""
 
+# Request ONNX Runtime telemetry opt-out before constructing speech sessions.
+# This runtime API is applied after native import; it is not a network sandbox.
+import onnxruntime as _onnxruntime
+
+_onnxruntime.disable_telemetry_events()
+del _onnxruntime
+
 from .assets import MODELS, Assets, ModelSpec, download_assets
 from .pipeline import (
     FPS,

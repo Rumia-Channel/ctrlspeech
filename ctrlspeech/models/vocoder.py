@@ -47,5 +47,8 @@ def load_decoder(local_path="", use_ema=True):
     msg = decoder.load_state_dict(filter_dict, strict=False)
     unexpected = [k for k in msg.unexpected_keys if k not in ("initted", "step")]
     if msg.missing_keys or unexpected:
-        print(f"[vocoder] missing={msg.missing_keys} unexpected={unexpected}")
+        raise RuntimeError(
+            "Incompatible or incomplete SVAE decoder checkpoint: "
+            f"missing={msg.missing_keys[:8]}, unexpected={unexpected[:8]}"
+        )
     return decoder
