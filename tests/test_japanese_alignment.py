@@ -44,6 +44,10 @@ def test_alignment_uses_isolated_runs_and_preserves_shared_cache(tmp_path, mfa, 
         assert kwargs["timeout"] == 600
         barrier.wait(timeout=5)
         assert all(path.exists() for path in corpus_paths)
+        # Keep both runs alive until both existence checks have completed.
+        # Otherwise the first return may correctly clean its own directory
+        # before the other thread gets scheduled for the assertion above.
+        barrier.wait(timeout=5)
         return SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(japanese, "_run_mfa_command", run)
