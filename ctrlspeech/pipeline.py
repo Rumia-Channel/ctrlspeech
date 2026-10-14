@@ -28,7 +28,8 @@ from .align import JapaneseMFAAligner
 from .assets import download_assets
 from .data import collate_japanese_sequences, encode_japanese_pair
 from .features import CosyVoiceSpeakerEmbedding, f0_to_coarse, get_pitch_and_loudness
-from .models import DiTar, load_decoder
+from .models import DiTar
+from svae.loading import load_decoder
 from .models.backbone import DEFAULT_LFM2_MODEL_ID
 from .retime import (
     MAX_DURATION_FRAMES,
@@ -335,7 +336,7 @@ class CtrlSpeech:
             )
         net = net.to(device).eval()
 
-        vocoder = load_decoder(local_path=str(assets.svae_dir)).to(device).eval()
+        vocoder = load_decoder(assets.svae_dir).to(device).eval()
         speaker_embedding = CosyVoiceSpeakerEmbedding(
             campplus_model=str(assets.campplus_path)
         )

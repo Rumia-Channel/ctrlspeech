@@ -17,7 +17,7 @@ from .embeds import DurationConditioner, JapaneseLinguisticConditioner, Timestep
 from .backbone import DEFAULT_LFM2_MODEL_ID, LFM2SpeechBackbone
 from .modules import AggregationEncoder, MLPStopPredictor
 from .backbone.dit import DiT
-from .vae.online_feature import load_state, process_online
+from svae.loading import build_encoder, encode_audio
 from .training_utils import (
     dropout_condition, flow_matching_path, left_pad_text_prefix, masked_mean,
 )
@@ -136,7 +136,7 @@ class DiTar(nn.Module):
 
         self.audio_type = config.audio_type
         vocoder_path = Path(config.vocoder.path).expanduser()
-        generator = load_state(save_path=str(vocoder_path.parent), tag=vocoder_path.name).eval()
+        generator = build_encoder(vocoder_path).eval()
         self.generator = generator
         self.generator.requires_grad_(False)
 
@@ -202,7 +202,7 @@ class DiTar(nn.Module):
             if raw_audio is None or audio_lengths is None:
                 raise ValueError("provide raw_audio/audio_lengths or vae_features/vae_lengths")
             with torch.no_grad():
-                vae_features = process_online(raw_audio, self.generator).transpose(1, 2)
+                vae_features = encode_audio(raw_audio, self.generator).transpose(1, 2)
             vae_lengths = torch.ceil(audio_lengths / self.generator.hop_length).long()
         elif raw_audio is not None:
             raise ValueError("raw_audio and vae_features are mutually exclusive")
@@ -695,7 +695,7 @@ class DiTar(nn.Module):
         if len(prompt_audio.shape) == 2:
             prompt_audio = prompt_audio.unsqueeze(1)
         
-        prompt_vae_features = process_online(prompt_audio, self.generator).transpose(1, 2) # (B, T, D)
+        prompt_vae_features = encode_audio(prompt_audio, self.generator).transpose(1, 2) # (B, T, D)
         prompt_vae_padding_masks = torch.ones(
             prompt_vae_features.shape[:-1], dtype=torch.bool, device=device)
 

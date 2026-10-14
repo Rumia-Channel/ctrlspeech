@@ -41,7 +41,7 @@ def tiny_model(monkeypatch):
             load_pretrained_weights=False, validate_architecture=False,
         )
     monkeypatch.setattr(ditar, "LFM2SpeechBackbone", backbone)
-    monkeypatch.setattr(ditar, "load_state", lambda **kwargs: nn.Sequential(nn.Linear(1, 1), nn.Dropout(0.5)))
+    monkeypatch.setattr(ditar, "build_encoder", lambda *args: nn.Sequential(nn.Linear(1, 1), nn.Dropout(0.5)))
     seed_training(7)
     return DiTar(config)
 
@@ -174,7 +174,7 @@ def test_short_text_predicts_first_patch_from_last_valid_phone(tiny_model):
 @pytest.mark.parametrize("strategy", ["only_drop_ctx", "drop_ctx_or_his", "drop_ctx_and_his"])
 def test_sampling_supports_all_cfg_modes_and_short_prompt(tiny_model, monkeypatch, strategy):
     from ctrlspeech.models import ditar
-    monkeypatch.setattr(ditar, "process_online", lambda *args: torch.randn(1, 64, 2))
+    monkeypatch.setattr(ditar, "encode_audio", lambda *args: torch.randn(1, 64, 2))
     tiny_model.eval()
     tiny_model.drop_condition = strategy
     result = tiny_model.sample(torch.zeros(1, 800), torch.zeros(1, 192),
@@ -533,7 +533,7 @@ def test_sampling_rejects_invalid_arguments_before_encoding(tiny_model, monkeypa
     def unexpected_encoding(*args, **kwargs):
         pytest.fail("invalid sampling arguments must be rejected before encoding")
 
-    monkeypatch.setattr(ditar, "process_online", unexpected_encoding)
+    monkeypatch.setattr(ditar, "encode_audio", unexpected_encoding)
     tiny_model.eval()
     with pytest.raises(ValueError, match=message):
         tiny_model.sample(torch.zeros(1, 800), torch.zeros(1, 192),

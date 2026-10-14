@@ -8,14 +8,11 @@ import torch.nn.functional as F
 
 from .base_model import BaseModel, CodecMixin
 from .layers import Snake1d, WNConv1d, WNConvTranspose1d
-from .utils import make_pad_mask
 from .bigvgan import BigVGAN
 from .regulator import InterpolateRegulator
 from .attn_proj import AttnProjection
 
 
-def masked_mean(x, mask):
-    return (x * mask).sum() / mask.sum()
 
 
 class AttrDict(dict):
@@ -296,27 +293,25 @@ class DAC(BaseModel, CodecMixin):
         return audio_data
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps * std + mu
+        # Posterior arithmetic stays FP32 under AMP; return the model's dtype.
+        std = torch.exp(0.5 * logvar.float())
+        return (torch.randn_like(std) * std + mu.float()).to(mu.dtype)
 
     def compute_kl_loss(self, mu, log_var):
-        # KL Loss 公式
-        kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - (log_var.exp() + 1e-6), dim=-1)  # 按最后一维求和
-        return kl_loss.mean()  # 求 batch 的平均值
+        # exp(12) exceeds FP16's range. expm1 also avoids cancellation near zero.
+        mu, log_var = mu.float(), log_var.float()
+        return 0.5 * (mu.square() + log_var.expm1() - log_var).sum(dim=-1).mean()
 
-    def encode(self, audio_data: torch.Tensor):
+    def posterior(self, audio_data: torch.Tensor):
         z = self.encoder(audio_data).transpose(1, 2)
         z = self.pre_block(z)
         mu = self.fc_mu(z)
-        log_var = self.fc_var(z)
-        log_var = torch.clamp(log_var, min=-12, max=12)  # log var可能会爆掉
+        log_var = self.fc_var(z).clamp(min=-12, max=12)
+        return mu, log_var
 
-        # z_hat = self.decoder_proj(self.reparameterize(mu,log_var)).transpose(1,2)
-        z_hat = self.reparameterize(mu, log_var)
-        kl_loss = self.compute_kl_loss(mu, log_var)
-
-        return z_hat, mu, log_var, kl_loss
+    def encode(self, audio_data: torch.Tensor):
+        mu, log_var = self.posterior(audio_data)
+        return self.reparameterize(mu, log_var), mu, log_var, self.compute_kl_loss(mu, log_var)
 
     def decode(self, z: torch.Tensor):
         if self.decoder_type == "dac":
@@ -335,24 +330,22 @@ class DAC(BaseModel, CodecMixin):
         length = audio_data.shape[-1]
         audio_data = self.preprocess(audio_data, sample_rate)
         z, mu, log_var, kl_loss = self.encode(audio_data)
-        proj_loss = 0.0
-        if self.distill and self.training:
-            guidance_lengths = [g.shape[0] for g in guidance]
-            z_lens = [zi.shape[0] for zi in z]
-            target_lengths = torch.tensor(guidance_lengths, device=z.device)
-            z_lengths = torch.tensor(z_lens, device=z.device)
-            z_mask = make_pad_mask(z_lengths, max_len=torch.max(target_lengths))  # 16 150, padding的部分是1
-
-            proj_z, olens = self.projectors(z, z_lengths, target_lengths)
-            bsz = proj_z.shape[0]
-            for i, (pi, gi) in enumerate(zip(proj_z, guidance)):
-                cos_sim = F.cosine_similarity(
-                    pi,  # 16, 150, 1024
-                    gi,  # 16, 150, 1024
-                    dim=-1,
-                )
-                proj_loss += masked_mean(-cos_sim, ~z_mask[i])
-            proj_loss = proj_loss / bsz
+        proj_loss = z.new_zeros((), dtype=torch.float32)
+        if self.distill and (self.training or guidance is not None):
+            if guidance is None or len(guidance) != len(z):
+                raise ValueError("semantic distillation requires one teacher sequence per waveform")
+            if any(g.ndim != 2 or g.shape[0] < 1 or g.shape[1] != self.distill_hidden_dim for g in guidance):
+                raise ValueError("teacher features must have shape [frames, distill_hidden_dim]")
+            lengths = [g.shape[0] for g in guidance]
+            projected, _ = self.projectors(z, [z.shape[1]] * len(z), lengths)
+            with torch.autocast(device_type=z.device.type, enabled=False):
+                if isinstance(guidance, torch.Tensor):
+                    proj_loss = -F.cosine_similarity(projected.float(), guidance.float(), dim=-1).mean()
+                else:
+                    proj_loss = torch.stack([
+                        -F.cosine_similarity(pi[:length].float(), gi.float(), dim=-1).mean()
+                        for pi, gi, length in zip(projected, guidance, lengths)
+                    ]).mean()
 
         x = self.decode(z)
         return {

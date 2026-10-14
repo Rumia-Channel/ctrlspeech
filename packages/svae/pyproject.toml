@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "svae"
+version = "0.1.0"
+description = "Semantic speech VAE codec and independent waveform training"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.11,<2.15", "torchaudio>=2.11,<2.15", "numpy>=1.26",
+    "soundfile>=0.12", "huggingface-hub>=0.24", "safetensors>=0.4",
+    "transformers==5.17.0", "omegaconf>=2.3",
+]
+
+[project.optional-dependencies]
+cpu = ["torch==2.11.0", "torchaudio==2.11.0"]
+cuda = ["torch==2.11.0+cu130", "torchaudio==2.11.0+cu130", "triton; sys_platform == 'linux'"]
+rocm = [
+    "torch[device-all]==2.14.0+rocm10.1.0", "torchaudio==2.11.0.3+rocm10.1.0",
+    "rocm[libraries,device-all]==10.1.0",
+    "triton==3.8.0+git669b31ac.rocm10.1.0; sys_platform == 'linux'",
+]
+xpu = ["torch==2.11.0+xpu", "torchaudio==2.11.0+xpu", "triton-xpu==3.7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["svae*"]
+
+[tool.setuptools.package-data]
+svae = ["models/dac/model/alias_free_activation/cuda/*.cpp", "models/dac/model/alias_free_activation/cuda/*.cu", "models/dac/model/alias_free_activation/cuda/*.h"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+    { index = "amd-rocm", extra = "rocm" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+torchaudio = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+    { index = "amd-rocm", extra = "rocm" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+triton = [{ index = "amd-rocm", extra = "rocm" }, { index = "pypi", extra = "cuda" }]
+triton-xpu = [{ index = "pytorch-xpu", extra = "xpu" }]
+rocm = [{ index = "amd-rocm", extra = "rocm" }]
