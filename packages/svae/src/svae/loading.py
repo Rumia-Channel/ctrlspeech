@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -33,6 +34,11 @@ def build_codec(config):
     """Instantiate an architecture, never infer pretrained weights from metadata."""
     options = copy.deepcopy(dict(config))
     decoder_config = options.pop("decoder_dict", copy.deepcopy(DEFAULT_DECODER_CONFIG))
+    encoder_hop = math.prod(options.get("encoder_rates", [2, 4, 8, 8]))
+    decoder_rates = (decoder_config["upsample_rates"] if options.get("decoder_type", "dac") == "bigvgan"
+                     else options.get("decoder_rates", [8, 8, 4, 2]))
+    if math.prod(decoder_rates) != encoder_hop:
+        raise ValueError("decoder upsampling factor must match the encoder hop")
     if options.get("decoder_type", "dac") == "bigvgan":
         if decoder_config.get("num_mels") != options.get("vae_dim", 8):
             raise ValueError("BigVGAN num_mels must match the codec vae_dim")
