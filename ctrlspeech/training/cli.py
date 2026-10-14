@@ -9,6 +9,7 @@ import torch
 from omegaconf import OmegaConf
 
 from ..models import DiTar
+from svae.runtime import resolve_device, validate_training_precision
 from .data import CachedSpeechDataset, LengthBucketBatchSampler
 from .engine import Trainer, TrainingConfig, TrainingStage, seed_training
 
@@ -23,7 +24,7 @@ def main(argv=None):
     parser.add_argument("--svae-dir", type=Path, help="SVAE folder containing metainfo.json (required for training)")
     parser.add_argument("--encoder-weights", type=Path, help="trained SVAE encoder state dict matching the feature caches")
     parser.add_argument("--resume", type=Path, help="resume a training checkpoint at an epoch boundary")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda[:N], rocm[:N], xpu[:N]")
     parser.add_argument("--precision", choices=("none", "bf16", "fp16"))
     parser.add_argument("--validate-only", action="store_true", help="audit all caches and splits without loading model weights")
     args = parser.parse_args(argv)
@@ -61,6 +62,8 @@ def main(argv=None):
                 dataset[index]
         print(json.dumps({"train_examples": len(train_data), "validation_examples": len(validation_data), "status": "valid"}))
         return
+    device = resolve_device(args.device)
+    validate_training_precision(device, config.precision)
     seed_training(config.seed)
     model = DiTar(model_config.model)
     if args.encoder_weights and not args.resume:
@@ -76,7 +79,7 @@ def main(argv=None):
                 state = selected
                 break
         model.generator.load_state_dict(state, strict=True)
-    trainer = Trainer(model, config, device=args.device)
+    trainer = Trainer(model, config, device=device)
     # Initialization flags are runtime details, not checkpoint architecture.
     canonical_config = OmegaConf.to_container(model_config, resolve=True)
     canonical_config["model"]["backbone"]["load_pretrained_weights"] = False

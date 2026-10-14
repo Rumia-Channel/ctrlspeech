@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from svae.runtime import accelerator_module, backend_name, resolve_device, validate_training_precision
 from .data import LengthBucketBatchSampler, collate_speech_examples
 
 
@@ -92,8 +93,6 @@ class TrainingConfig:
 def seed_training(seed):
     random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def move_batch(value, device):
@@ -144,15 +143,8 @@ def weighted_loss(metrics, weights):
 class Trainer:
     def __init__(self, model, config, *, device="cpu"):
         self.config = config
-        self.device = torch.device(device)
-        if self.device.type == "cuda" and self.device.index is None:
-            self.device = torch.device("cuda", torch.cuda.current_device())
-        if config.precision == "fp16" and self.device.type != "cuda":
-            raise ValueError("fp16 training requires CUDA; use none or bf16 on CPU")
-        if config.precision == "bf16" and self.device.type == "cuda":
-            with torch.cuda.device(self.device):
-                if not torch.cuda.is_bf16_supported():
-                    raise ValueError("this CUDA device does not support bf16; use fp16 or none")
+        self.device = resolve_device(device)
+        validate_training_precision(self.device, config.precision)
         self.model = model.to(self.device)
         if config.gradient_checkpointing:
             self.model.causalAR.model.gradient_checkpointing_enable(
@@ -160,10 +152,7 @@ class Trainer:
             )
             self.model.LocDiT.checkpoint_activations = True
         self.optimizer = build_optimizer(model, config)
-        if hasattr(torch.amp, "GradScaler"):
-            self.scaler = torch.amp.GradScaler("cuda", enabled=config.precision == "fp16")
-        else:  # torch 2.2 compatibility
-            self.scaler = torch.cuda.amp.GradScaler(enabled=config.precision == "fp16")
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=config.precision == "fp16")
         self.global_step = 0
         self.completed_epochs = 0
         self.stage_step = 0
@@ -225,17 +214,18 @@ class Trainer:
         """Use fixed flow noise/time, restoring training RNG and model mode."""
         mode = self.model.training
         python_rng = random.getstate()
-        devices = [self.device.index or 0] if self.device.type == "cuda" else []
+        accelerator = accelerator_module(self.device)
+        devices = [self.device.index] if accelerator is not None else []
         totals, samples = {}, 0
         try:
             self.model.eval()
-            with torch.random.fork_rng(devices=devices):
+            with torch.random.fork_rng(devices=devices, device_type=self.device.type):
                 random.seed(self.config.validation_seed)
                 # Seed only devices whose RNG is preserved by fork_rng.
                 torch.random.default_generator.manual_seed(self.config.validation_seed)
-                if devices:
-                    with torch.cuda.device(devices[0]):
-                        torch.cuda.manual_seed(self.config.validation_seed)
+                if accelerator is not None:
+                    with accelerator.device(self.device):
+                        accelerator.manual_seed(self.config.validation_seed)
                 for batch in loader:
                     batch = move_batch(batch, self.device)
                     with self.autocast():
@@ -258,7 +248,7 @@ class Trainer:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
-            "format_version": 1,
+            "format_version": 2,
             "state_dict": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -271,7 +261,14 @@ class Trainer:
             "best_validation": self.best_validation,
             "rng": torch.get_rng_state(),
             "python_rng": random.getstate(),
-            "cuda_rng": torch.cuda.get_rng_state_all() if self.device.type == "cuda" else [],
+            "accelerator_rng": {
+                "backend": backend_name(self.device),
+                "index": self.device.index,
+                "state": (
+                    accelerator_module(self.device).get_rng_state(self.device)
+                    if self.device.type != "cpu" else None
+                ),
+            },
             "torch_version": str(torch.__version__),
         }
         temporary = path.with_suffix(path.suffix + ".tmp")
@@ -280,12 +277,16 @@ class Trainer:
 
     def restore(self, path, *, model_config, data_signature):
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if checkpoint.get("format_version") != 1:
+        if checkpoint.get("format_version") != 2:
             raise ValueError("unsupported training checkpoint format")
         if checkpoint["training_config"] != asdict(self.config) or checkpoint["model_config"] != model_config:
             raise ValueError("resume requires the original training and model configuration")
         if checkpoint["data_signature"] != data_signature:
             raise ValueError("resume requires the original data manifests")
+        accelerator_rng = checkpoint["accelerator_rng"]
+        if (accelerator_rng["backend"] != backend_name(self.device) or
+                accelerator_rng["index"] != self.device.index):
+            raise ValueError("resume requires the original accelerator backend and device index")
         self.model.load_state_dict(checkpoint["state_dict"], strict=True)
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.scaler.load_state_dict(checkpoint["scaler"])
@@ -293,8 +294,9 @@ class Trainer:
             setattr(self, name, checkpoint[name])
         torch.set_rng_state(checkpoint["rng"])
         random.setstate(checkpoint["python_rng"])
-        if self.device.type == "cuda" and checkpoint["cuda_rng"]:
-            torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            accelerator.set_rng_state(accelerator_rng["state"], self.device)
 
     def fit(self, train_data, validation_data, output_dir, *, model_config, data_signature):
         if train_data.speakers & validation_data.speakers:
@@ -334,7 +336,7 @@ class Trainer:
         )
         return DataLoader(
             dataset, batch_sampler=sampler, collate_fn=collate_speech_examples,
-            num_workers=self.config.num_workers, pin_memory=self.device.type == "cuda",
+            num_workers=self.config.num_workers, pin_memory=self.device.type != "cpu",
             # A loader must not consume the model/flow RNG when iterated.
             generator=torch.Generator().manual_seed(self.config.seed + epoch),
         )

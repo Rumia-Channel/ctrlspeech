@@ -24,8 +24,6 @@ import tempfile
 import threading
 from pathlib import Path
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
-
 DEMO_DIR = Path(__file__).resolve().parent
 REPO_ROOT = DEMO_DIR.parent
 # `panel serve` adds the script's directory itself, but importing this module
@@ -55,6 +53,7 @@ pn.extension(notifications=True, sizing_mode="stretch_width")
 
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 MODEL_NAME = os.environ.get("CTRLSPEECH_DEMO_MODEL", "japanese-lfm2-350m")
+MODEL_DEVICE = os.environ.get("CTRLSPEECH_DEMO_DEVICE", "auto")
 
 DEFAULT_STEPS = 32
 DEFAULT_CFG_STRENGTH = 1.5
@@ -108,7 +107,7 @@ def get_model():
     # Sessions share the same process cache; first-use uploads may race.
     with _MODEL_LOAD_LOCK:
         if "ctrlspeech" not in pn.state.cache:
-            pn.state.cache["ctrlspeech"] = CtrlSpeech.from_pretrained(MODEL_NAME)
+            pn.state.cache["ctrlspeech"] = CtrlSpeech.from_pretrained(MODEL_NAME, device=MODEL_DEVICE)
         return pn.state.cache["ctrlspeech"]
 
 

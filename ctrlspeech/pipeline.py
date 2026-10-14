@@ -37,6 +37,7 @@ from .retime import (
     MAX_TIMELINE_FRAMES,
     time_to_frame_index,
 )
+from svae.runtime import resolve_device
 
 SAMPLE_RATE = 16000
 HOP_LENGTH = 160                    # 100 frames/s, matching the *100 in duration_segments
@@ -284,6 +285,7 @@ class CtrlSpeech:
     def from_pretrained(cls, model="japanese-lfm2-350m", device=None, repo_id=None,
                         revision=None, aligner=None, progress=False,
                         frontend=None, native_tokenizer=None):
+        device = resolve_device(device)
         assets = download_assets(model=model, repo_id=repo_id, revision=revision)
         return cls.from_assets(
             assets, device=device, aligner=aligner, progress=progress,
@@ -293,9 +295,7 @@ class CtrlSpeech:
     @classmethod
     def from_assets(cls, assets, device=None, aligner=None, progress=False,
                     frontend=None, native_tokenizer=None):
-        device = torch.device(
-            device or ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        device = resolve_device(device)
 
         config = OmegaConf.load(assets.config_path)
         # This branch is intentionally LFM2-only. Published upstream CtrlSpeech

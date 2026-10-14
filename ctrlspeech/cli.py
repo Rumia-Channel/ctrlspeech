@@ -42,7 +42,7 @@ def parse_args(argv=None):
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--model", default="japanese-lfm2-350m", choices=sorted(MODELS))
-    p.add_argument("--device", default=None, help="cuda, cuda:1, cpu (default: auto)")
+    p.add_argument("--device", default="auto", help="auto, cpu, cuda[:N], rocm[:N], xpu[:N]")
     p.add_argument("--out", type=Path, required=True)
 
     src = p.add_argument_group("baseline from an existing recording")

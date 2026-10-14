@@ -539,3 +539,67 @@ def test_sampling_rejects_invalid_arguments_before_encoding(tiny_model, monkeypa
         tiny_model.sample(torch.zeros(1, 800), torch.zeros(1, 192),
                           torch.tensor([[2, 3, 4]]), torch.ones(1, 3, dtype=torch.bool),
                           **{setting: value})
+
+
+@pytest.mark.parametrize("kind,hip", [("xpu", None), ("cuda", "10.1.0")])
+def test_validation_and_resume_preserve_selected_accelerator_rng(monkeypatch, tmp_path, kind, hip):
+    """Simulate GPU RNG APIs while running the loss on real CPU tensors."""
+    from contextlib import contextmanager
+    from ctrlspeech.training import engine
+
+    trainer = Trainer(TinyObjective(), training_config())
+    resumed = Trainer(copy.deepcopy(trainer.model), training_config())
+    trainer.device = resumed.device = torch.device(kind, 1)
+    monkeypatch.setattr(torch.version, "hip", hip)
+    module = getattr(torch, kind)
+    generators = [torch.Generator().manual_seed(13), torch.Generator().manual_seed(29)]
+    selected = [0]
+
+    def index(device):
+        return device.index if isinstance(device, torch.device) else device
+
+    @contextmanager
+    def device_context(device):
+        previous = selected[0]
+        selected[0] = index(device)
+        try:
+            yield
+        finally:
+            selected[0] = previous
+
+    monkeypatch.setattr(module, "device", device_context)
+    monkeypatch.setattr(module, "manual_seed", lambda seed: generators[selected[0]].manual_seed(seed))
+    monkeypatch.setattr(module, "get_rng_state", lambda device: generators[index(device)].get_state())
+    monkeypatch.setattr(module, "set_rng_state", lambda state, device: generators[index(device)].set_state(state))
+    move_batch = engine.move_batch
+    monkeypatch.setattr(engine, "move_batch", lambda batch, device: move_batch(batch, "cpu"))
+    original_forward = trainer.model.forward
+
+    def randomized_forward(**batch):
+        result = original_forward(**batch)
+        result["diff_loss"] = result["diff_loss"] * torch.rand((), generator=generators[1])
+        return result
+
+    monkeypatch.setattr(trainer.model, "forward", randomized_forward)
+    loader = [{"text_inputs": torch.ones(1, 1)}]
+    states = [generator.get_state().clone() for generator in generators]
+    cpu_rng = torch.get_rng_state().clone()
+    assert trainer.evaluate(loader) == trainer.evaluate(loader)
+    with pytest.raises(FloatingPointError):
+        trainer.evaluate([{"text_inputs": torch.full((1, 1), float("nan"))}])
+    assert torch.equal(cpu_rng, torch.get_rng_state())
+    for generator, state in zip(generators, states):
+        assert torch.equal(generator.get_state(), state)
+
+    path = tmp_path / "accelerator.ckpt"
+    trainer.save(path, model_config={}, data_signature={})
+    expected_next = torch.rand(4, generator=generators[1])
+    resumed.restore(path, model_config={}, data_signature={})
+    torch.testing.assert_close(torch.rand(4, generator=generators[1]), expected_next, rtol=0, atol=0)
+    assert torch.equal(generators[0].get_state(), states[0])
+    resumed.device = torch.device("cpu")
+    before = {name: value.clone() for name, value in resumed.model.state_dict().items()}
+    with pytest.raises(ValueError):
+        resumed.restore(path, model_config={}, data_signature={})
+    for name, value in resumed.model.state_dict().items():
+        torch.testing.assert_close(value, before[name], rtol=0, atol=0)
