@@ -14,6 +14,10 @@ dependencies = [
     "transformers==5.17.0", "omegaconf>=2.3",
 ]
 
+[project.scripts]
+svae-train = "svae.training.cli:main"
+svae-export = "svae.training.cli:export_main"
+
 [project.optional-dependencies]
 cpu = ["torch==2.11.0", "torchaudio==2.11.0"]
 cuda = ["torch==2.11.0+cu130", "torchaudio==2.11.0+cu130", "triton; sys_platform == 'linux'"]
