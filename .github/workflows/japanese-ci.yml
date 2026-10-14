@@ -25,14 +25,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Create CPU test environment
-        run: uv venv
-
       - name: Install CPU test dependencies
-        run: uv pip install --torch-backend cpu -e ".[japanese]" --group dev "torch==2.11.0" "torchaudio==2.11.0"
+        run: uv sync --frozen --extra cpu --extra japanese --group dev
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall -q ctrlspeech demo tests
+        run: uv run --no-sync python -m compileall -q ctrlspeech packages/svae/src demo tests
 
       - name: CPU regressions (native ONNX runtime isolated)
         env:
