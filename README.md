@@ -10,9 +10,10 @@
 > **Japanese development branch:** this branch replaces the upstream Qwen3 AR
 > backbone with the unmodified `LiquidAI/LFM2.5-350M-Base` architecture and
 > uses `pyopenjtalk-plus` for Japanese linguistic/prosody preprocessing.
-> Upstream CtrlSpeech checkpoints are intentionally incompatible. There is no
-> released Japanese LFM2 checkpoint yet; use `main` for the original published
-> models. See [JAPANESE.md](JAPANESE.md) for implementation status.
+> The waveform codec is SARA-based: native 48 kHz audio, 50 Hz / 128-D latents by default.
+> Upstream CtrlSpeech and previous 16 kHz / 40 Hz checkpoints are intentionally
+> incompatible. There is no released Japanese LFM2/SARA checkpoint yet; use
+> `main` for the original published models. See [JAPANESE.md](JAPANESE.md).
 
 CtrlSpeech is a zero-shot TTS model you can *steer after the fact*. Generate a
 sentence, read back its pitch contour, loudness contour and phoneme boundaries,
@@ -25,7 +26,7 @@ keeps its original timing.
 
 ```
 prompt voice ─┐
-              ├─► DiTar (AR + LocDiT flow matching) ─► SVAE latents ─► waveform
+              ├─► DiTar (AR + LocDiT flow matching) ─► SARA latents ─► waveform
 target text ──┘         ▲
                         │  per-token pitch (128 bins) / loudness (64 bins) /
                         │  duration (frames) embeddings
@@ -72,17 +73,17 @@ Training and inference share `--device auto|cpu|cuda[:N]|rocm[:N]|xpu[:N]`.
 `auto` selects CUDA/ROCm, then XPU, then CPU. Explicit unavailable devices and
 invalid GPU indices fail rather than silently running on CPU. ROCm uses
 PyTorch's CUDA API internally; `--device rocm` additionally requires a HIP build.
-Sampling and the SVAE vocoder use the native Torch path, without requiring
-NVIDIA-only convolution or fused vocoder extensions. Speaker embeddings and
-audio/text preprocessing remain on CPU.
+Sampling and the SARA codec use native Torch without requiring NVIDIA-only
+convolution or fused vocoder extensions. SSL log-mel extraction, pitch/loudness
+and external speaker/alignment preprocessing use CPU; the frozen W2v-BERT model runs on the selected device.
 
-The waveform codec lives in the independent **`svae` workspace package** at
-`packages/svae`; it does not import CtrlSpeech. Use `uv run --package svae
+The SARA-based waveform codec lives in the independent **`svae` workspace package**
+at `packages/svae`; it does not import CtrlSpeech. Use `uv run --package svae
 --extra xpu svae-train ...` for waveform-only training, and `svae-export` to
-publish paired encoder/decoder assets. A member-only sync needs neither the
-Japanese frontend nor the demo/ONNX dependencies. See
-[TRAINING.md](TRAINING.md#svae-を-wav-から学習する) for WAV requirements, the
-frozen SSL teacher, real GAN objectives, checkpoint resume and export usage.
+publish self-contained encoder/decoder assets. A member-only sync needs neither
+the Japanese frontend nor demo/ONNX dependencies. See
+[TRAINING.md](TRAINING.md#sara-を-wav-から学習する) for the dual-stream architecture,
+frozen SSL branch, GAN objectives, checkpoint resume and offline export usage.
 
 
 **Montreal Forced Aligner** is required for anything that derives phoneme
@@ -167,7 +168,7 @@ checkpoint compatibility, Japanese speech quality, or GPU performance. CI uses t
 explicitly limited mode. Hub downloads and Hub telemetry are disabled in tests.
 
 To require an actual accelerator rather than accept CPU, run the small real
-LFM2/DiT/SVAE training, checkpoint-resume, cached sampling and WAV-decoding
+LFM2/DiT/SARA training, checkpoint-resume, cached sampling and WAV-decoding
 regressions on that machine:
 
 ```bash
@@ -185,8 +186,8 @@ simulated accelerator RNG preservation, which is not evidence of GPU execution.
 
 For the independent codec's real training/export checks, set
 `SVAE_TEST_DEVICE=xpu` (or `rocm`) and run `tests/test_svae_training.py` using
-the selected root backend profile. The local SSL teacher has deliberately
-small test weights; this verifies execution, not pretrained semantic quality.
+the selected root backend profile. The local W2v-BERT has deliberately small
+test weights; this verifies execution, not pretrained semantic quality.
 
 
 
@@ -268,7 +269,7 @@ a finished CtrlSpeech-JA checkpoint contains the complete fine-tuned body.
 
 ## How the control works
 
-Audio is analysed at **100 frames per second** (16 kHz, hop 160).
+Audio is analysed at **100 frames per second** (48 kHz, hop 480).
 
 - **Pitch** — F0 mapped to 128 mel-spaced bins; bin 0 means unvoiced. Slider
   shifts skip unvoiced frames so silence is not given a pitch.
@@ -279,12 +280,12 @@ Audio is analysed at **100 frames per second** (16 kHz, hop 160).
   boundaries, accent nucleus and phrase mora count are separate conditions from
   measured/edited F0.
 - **Long form** — the current safety target is **60 s** / 6001 control frames,
-  with at most 600 AR steps.
+  with at most 750 AR steps.
 
 Stretching a word rescales its phoneme boundaries uniformly and shifts
 everything after it, so inter-word pauses keep their original length.
 
-The AR model emits `patch_size=4` SVAE latents per step at 40 Hz, i.e. **0.1 s
+The AR model emits `patch_size=4` SARA latents per step at 50 Hz, i.e. **0.08 s
 per step**. The step budget is derived from the requested duration
 (`estimate_max_seq_length`) rather than fixed, so a stretched sentence is not
 truncated.
@@ -326,10 +327,10 @@ ctrlspeech/
 packages/svae/
   pyproject.toml     independent package and svae-train / svae-export commands
   src/svae/
-    models/         DAC/BigVGAN codec and native alias-free activations
+    models/         frozen W2v-BERT, residual CNN/LSTM and native HiFi-GAN
     loading.py      paired codec assets and frozen encoding/decoding APIs
     runtime.py      shared CPU/CUDA/ROCm/XPU and precision selection
-    training/      WAV crops, frozen SSL teacher, GAN trainer, checkpoints, exports
+    training/       WAV crops, GAN trainer, checkpoints and self-contained exports
 demo/
   app.py             Panel application
   interactive_plot.py Bokeh contour and phoneme editor
