@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "svae"
 version = "0.1.0"
-description = "Semantic speech VAE codec and independent waveform training"
+description = "Independent SARA-based dual-stream speech VAE training and codec"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
@@ -32,8 +32,6 @@ xpu = ["torch==2.11.0+xpu", "torchaudio==2.11.0+xpu", "triton-xpu==3.7.0"]
 where = ["src"]
 include = ["svae*"]
 
-[tool.setuptools.package-data]
-svae = ["models/dac/model/alias_free_activation/cuda/*.cpp", "models/dac/model/alias_free_activation/cuda/*.cu", "models/dac/model/alias_free_activation/cuda/*.h"]
 
 [tool.uv.sources]
 torch = [

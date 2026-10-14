@@ -1,1 +1,0 @@
-"""Waveform variational codec architecture."""

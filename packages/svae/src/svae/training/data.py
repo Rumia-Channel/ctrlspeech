@@ -11,6 +11,8 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
+from ..constants import AUDIO_SAMPLE_RATE, LATENT_HOP_LENGTH
+
 
 def file_digest(path):
     digest = hashlib.sha256()
@@ -21,12 +23,12 @@ def file_digest(path):
 
 
 class WaveDataset(Dataset):
-    sample_rate = 16000
+    sample_rate = AUDIO_SAMPLE_RATE
 
     def __init__(self, directory, clip_samples, *, seed=42):
         self.directory = Path(directory).resolve()
-        if type(clip_samples) is not int or clip_samples < 400:
-            raise ValueError("clip_samples must be an integer >=400")
+        if type(clip_samples) is not int or clip_samples < LATENT_HOP_LENGTH:
+            raise ValueError("clip_samples must be an integer >=960")
         self.clip_samples, self.seed, self.epoch = clip_samples, seed, 0
         self.records, self.excluded, self.resamplers = [], [], {}
         paths = sorted(path for path in self.directory.rglob("*") if path.is_file() and path.suffix.lower() == ".wav")

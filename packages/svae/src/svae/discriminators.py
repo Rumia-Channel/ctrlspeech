@@ -29,7 +29,7 @@ class _Critic(nn.Module):
 
 
 class SpeechDiscriminator(nn.Module):
-    def __init__(self, periods=(2, 3, 5, 7, 11), fft_sizes=(2048, 1024, 512),
+    def __init__(self, periods=(2, 3, 5, 7, 11), fft_sizes=(4096, 2048, 1024),
                  bands=((0, .1), (.1, .25), (.25, .5), (.5, .75), (.75, 1.)), channels=32):
         super().__init__()
         if type(channels) is not int or channels < 1:

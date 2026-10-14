@@ -1,106 +1,92 @@
-"""Paired codec exports and the frozen encoder/decoder APIs used by TTS."""
+"""Self-contained SARA pairs and frozen codec APIs used by TTS."""
 
 from __future__ import annotations
 
 import copy
 import json
-import math
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
+from safetensors.torch import load_file
 
-from .models.dac.model import DAC
+from .models.sara import SARA, SARADecoder, SARAEncoder, validate_config
+from .constants import DEFAULT_LATENT_DIM
 
-DEFAULT_DECODER_CONFIG = {
-    "resblock": "1", "num_mels": 64,
-    "upsample_rates": [5, 5, 2, 2, 2, 2],
-    "upsample_kernel_sizes": [9, 9, 4, 4, 4, 4],
-    "upsample_initial_channel": 1024,
-    "resblock_kernel_sizes": [3, 7, 11],
-    "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-    "use_tanh_at_final": False, "use_bias_at_final": False,
-    "activation": "snakebeta", "snake_logscale": True,
-}
+CODEC_FORMAT_VERSION = 2
 DEFAULT_CODEC_CONFIG = {
-    "encoder_dim": 64, "encoder_rates": [4, 4, 5, 5], "latent_dim": None,
-    "decoder_dim": 1024, "decoder_rates": [5, 5, 4, 4],
-    "vae_dim": 64, "sample_rate": 16000, "distill": True,
-    "distill_hidden_dim": 1024, "decoder_type": "bigvgan",
-    "pre_vae_block": False, "attn_proj": True, "post_vae_block": False,
+    "sample_rate": 48000, "vae_dim": DEFAULT_LATENT_DIM,
+    "encoder_dim": 64, "acoustic_dim": 1024, "encoder_rates": [4, 3, 4, 4, 5],
+    "decoder_dim": 1024, "decoder_rates": [5, 4, 4, 3, 4],
+    "resblock_kernel_sizes": [3, 7, 11], "resblock_dilations": [1, 3, 5],
+    "semantic_model": "facebook/w2v-bert-2.0", "semantic_revision": None,
 }
 
 
-def build_codec(config):
-    """Instantiate an architecture, never infer pretrained weights from metadata."""
-    options = copy.deepcopy(dict(config))
-    decoder_config = options.pop("decoder_dict", copy.deepcopy(DEFAULT_DECODER_CONFIG))
-    encoder_hop = math.prod(options.get("encoder_rates", [2, 4, 8, 8]))
-    decoder_rates = (decoder_config["upsample_rates"] if options.get("decoder_type", "dac") == "bigvgan"
-                     else options.get("decoder_rates", [8, 8, 4, 2]))
-    if math.prod(decoder_rates) != encoder_hop:
-        raise ValueError("decoder upsampling factor must match the encoder hop")
-    if options.get("decoder_type", "dac") == "bigvgan":
-        if decoder_config.get("num_mels") != options.get("vae_dim", 8):
-            raise ValueError("BigVGAN num_mels must match the codec vae_dim")
-        if decoder_config.get("use_cuda_kernel", False):
-            raise ValueError("codec training and exports require the native Torch vocoder path")
-    return DAC(**options, decoder_dict=decoder_config)
+def build_codec(config, *, pretrained=True):
+    """Training starts from complete SSL weights; offline loading uses saved architecture."""
+    return SARA(copy.deepcopy(dict(config)), pretrained=pretrained)
 
 
 def read_codec_config(directory):
     with (Path(directory) / "metainfo.json").open(encoding="utf-8") as stream:
-        return json.load(stream)["DAC"]
+        document = json.load(stream)
+    if document.get("sara_format_version") != CODEC_FORMAT_VERSION or "SARA" not in document:
+        raise ValueError("incompatible codec: export a 48 kHz / 50 Hz SARA pair and regenerate TTS features")
+    config = document["SARA"]
+    validate_config(config)
+    return config
 
 
 def encoder_state(state):
-    """Extract the complete encoder side from a full paired codec state."""
-    return {key: value for key, value in state.items()
-            if not key.startswith(("projectors.", "decoder.", "decoder_proj."))}
+    return {key: value for key, value in state.items() if not key.startswith("decoder.")}
 
 
-def _weights(directory, use_ema):
-    path = Path(directory) / "dac" / ("ema_state_dict.pth" if use_ema else "weights.pth")
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    state = ({key.removeprefix("ema_model."): value for key, value in checkpoint.items()}
-             if use_ema else checkpoint["state_dict"])
-    return {key: value for key, value in state.items() if key not in {"initted", "step"}}
+def trainable_state(state):
+    """Frozen SSL weights live once in encoder.safetensors, not in EMA snapshots."""
+    return {key: value for key, value in state.items() if not key.startswith("semantic.")}
+
+
+def _selected_weights(directory, *, use_ema, prefixes=None):
+    path = Path(directory) / ("ema.safetensors" if use_ema else "weights.safetensors")
+    with safe_open(str(path), framework="pt", device="cpu") as tensors:
+        return {key: tensors.get_tensor(key) for key in tensors.keys()
+                if prefixes is None or key.startswith(prefixes)}
 
 
 def build_encoder(directory):
-    encoder = build_codec(read_codec_config(directory))
-    del encoder.projectors, encoder.decoder, encoder.decoder_proj
-    return encoder.eval()
+    """Build architecture only; a complete encoder state is required before use."""
+    return SARAEncoder(read_codec_config(directory), pretrained=False).eval()
 
 
 def load_codec(directory, *, use_ema=True):
-    codec = build_codec(read_codec_config(directory))
-    codec.load_state_dict(_weights(directory, use_ema), strict=True)
+    codec = build_codec(read_codec_config(directory), pretrained=False)
+    with safe_open(str(Path(directory) / "encoder.safetensors"), framework="pt", device="cpu") as tensors:
+        state = {key: tensors.get_tensor(key) for key in tensors.keys() if key.startswith("semantic.")}
+    state.update(_selected_weights(directory, use_ema=use_ema))
+    codec.load_state_dict(state, strict=True, assign=True)
     return codec.eval()
 
 
 def load_encoder(directory, *, use_ema=True):
     encoder = build_encoder(directory)
-    encoder.load_state_dict(encoder_state(_weights(directory, use_ema)), strict=True)
+    state = load_file(str(Path(directory) / "encoder.safetensors"))
+    if not use_ema:
+        state.update(encoder_state(_selected_weights(directory, use_ema=False)))
+    encoder.load_state_dict(state, strict=True, assign=True)
     return encoder.eval().requires_grad_(False)
 
 
 def load_decoder(directory, *, use_ema=True):
-    decoder = build_codec(read_codec_config(directory))
-    del decoder.projectors, decoder.encoder, decoder.pre_block, decoder.fc_mu, decoder.fc_var
-    if decoder.decoder_type == "bigvgan":
-        del decoder.decoder_proj
-    state = _weights(directory, use_ema)
-    excluded = ("projectors.", "encoder.", "pre_block.", "fc_mu.", "fc_var.")
-    if decoder.decoder_type == "bigvgan":
-        excluded += ("decoder_proj.",)
-    decoder.load_state_dict({key: value for key, value in state.items()
-                            if not key.startswith(excluded)}, strict=True)
+    """Load just native HiFiGAN: no SSL construction, downloads or SSL tensors."""
+    decoder = SARADecoder(read_codec_config(directory))
+    decoder.load_state_dict(_selected_weights(directory, use_ema=use_ema, prefixes=("decoder.",)),
+                            strict=True, assign=True)
     return decoder.eval().requires_grad_(False)
 
 
 @torch.no_grad()
 def encode_audio(signal, encoder):
-    """Sample [B, D, T] latents once; skip the training-only KL computation."""
-    audio = encoder.preprocess(signal, encoder.sample_rate)
-    mu, logvar = encoder.posterior(audio)
+    """Sample [B,D,T] latents once; skip the training-only KL computation."""
+    mu, logvar = encoder.posterior(signal)
     return encoder.reparameterize(mu, logvar).transpose(1, 2)

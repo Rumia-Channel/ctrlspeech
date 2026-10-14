@@ -16,7 +16,8 @@ from safetensors.torch import save_file
 from torch.utils.data import DataLoader
 
 from ..discriminators import SpeechDiscriminator
-from ..loading import encoder_state
+from ..constants import AUDIO_SAMPLE_RATE, LATENT_HOP_LENGTH
+from ..loading import CODEC_FORMAT_VERSION, encoder_state, trainable_state
 from ..losses import (SpectralReconstructionLoss, discriminator_loss,
                       feature_matching_loss, generator_adversarial_loss)
 from ..runtime import accelerator_module, backend_name, resolve_device, validate_training_precision
@@ -27,20 +28,19 @@ from .data import require_disjoint
 class TrainingConfig:
     epochs: int = 10
     batch_size: int = 4
-    clip_seconds: float = 3.0
+    clip_seconds: float = 1.0
     precision: str = "bf16"
     learning_rate: float = 1e-4
-    lr_decay: float = 0.9996
+    lr_decay: float = 0.9999996
+    warmup_steps: int = 10000
+    weight_decay: float = 0.01
     ema_decay: float = 0.999
     max_grad_norm: float = 1.0
     reconstruction_weight: float = 15.0
     kl_weight: float = 0.01
     adversarial_weight: float = 1.0
-    feature_weight: float = 2.0
-    semantic_weight: float = 1.0
-    teacher_model: str = "microsoft/wavlm-large"
-    teacher_revision: str | None = None
-    fft_sizes: tuple[int, ...] = (2048, 1024, 512)
+    feature_weight: float = 1.0
+    fft_sizes: tuple[int, ...] = (4096, 2048, 1024)
     n_mels: int = 80
     periods: tuple[int, ...] = (2, 3, 5, 7, 11)
     bands: tuple[tuple[float, float], ...] = ((0, .1), (.1, .25), (.25, .5), (.5, .75), (.75, 1.))
@@ -51,7 +51,7 @@ class TrainingConfig:
 
     def __post_init__(self):
         for name, minimum in (("epochs", 1), ("batch_size", 1), ("num_workers", 0),
-                              ("n_mels", 1), ("discriminator_channels", 1)):
+                              ("n_mels", 1), ("discriminator_channels", 1), ("warmup_steps", 0)):
             if type(getattr(self, name)) is not int or getattr(self, name) < minimum:
                 raise ValueError(f"{name} must be an integer >={minimum}")
         for name in ("seed", "validation_seed"):
@@ -60,24 +60,22 @@ class TrainingConfig:
         for name in ("learning_rate", "max_grad_norm", "reconstruction_weight", "adversarial_weight"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        for name in ("kl_weight", "feature_weight", "semantic_weight"):
+        for name in ("kl_weight", "feature_weight", "weight_decay"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if not 0 < self.lr_decay <= 1 or not 0 <= self.ema_decay < 1:
             raise ValueError("lr_decay must be in (0,1] and ema_decay in [0,1)")
         if not math.isfinite(self.clip_seconds) or not 0 < self.clip_seconds <= 60:
             raise ValueError("clip_seconds must be finite and in (0,60]")
-        if self.clip_samples < 400 or self.clip_samples % 400:
-            raise ValueError("clip_seconds must use the 40 Hz latent grid (multiples of .025 seconds)")
-        if self.semantic_weight > 0 and not self.teacher_model:
-            raise ValueError("semantic alignment requires a pretrained teacher_model")
+        if self.clip_samples < LATENT_HOP_LENGTH or self.clip_samples % LATENT_HOP_LENGTH:
+            raise ValueError("clip_seconds must use the 50 Hz latent grid (multiples of .02 seconds)")
         object.__setattr__(self, "fft_sizes", tuple(self.fft_sizes))
         object.__setattr__(self, "periods", tuple(self.periods))
         object.__setattr__(self, "bands", tuple(tuple(band) for band in self.bands))
 
     @property
     def clip_samples(self):
-        return round(self.clip_seconds * 16000)
+        return round(self.clip_seconds * AUDIO_SAMPLE_RATE)
 
     def resume_settings(self):
         values = asdict(self)
@@ -108,43 +106,54 @@ def export_codec(codec_config, state, ema_state, directory):
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise FileExistsError(f"export destination already exists: {destination}")
+    if not codec_config.get("semantic_config") or not codec_config.get("semantic_extractor_config"):
+        raise ValueError("export requires the resolved SARA SSL architecture")
     raw = {key: value.detach().cpu().contiguous() for key, value in state.items()}
-    ema = {key: value.detach().cpu().contiguous() for key, value in ema_state.items()}
-    with tempfile.TemporaryDirectory(prefix=".svae-export-", dir=destination.parent) as temporary:
+    ema = dict(raw)
+    ema.update({key: value.detach().cpu().contiguous() for key, value in trainable_state(ema_state).items()})
+    with tempfile.TemporaryDirectory(prefix=".sara-export-", dir=destination.parent) as temporary:
         root = Path(temporary) / "codec"
-        (root / "dac").mkdir(parents=True)
-        (root / "metainfo.json").write_text(json.dumps({"DAC": codec_config}, indent=2), encoding="utf-8")
-        torch.save({"state_dict": raw}, root / "dac" / "weights.pth")
-        torch.save({"ema_model." + key: value for key, value in ema.items()}, root / "dac" / "ema_state_dict.pth")
+        root.mkdir()
+        (root / "metainfo.json").write_text(
+            json.dumps({"sara_format_version": CODEC_FORMAT_VERSION, "SARA": codec_config}, indent=2),
+            encoding="utf-8")
+        save_file(trainable_state(raw), str(root / "weights.safetensors"))
+        save_file(trainable_state(ema), str(root / "ema.safetensors"))
         save_file(encoder_state(ema), str(root / "encoder.safetensors"))
         os.replace(root, destination)
     return destination
 
 
 class Trainer:
-    format_version = 1
+    format_version = 2
 
-    def __init__(self, codec, config, *, codec_config, device="auto", teacher=None):
+    def __init__(self, codec, config, *, device="auto"):
         self.device = resolve_device(device)
         validate_training_precision(self.device, config.precision)
-        self.config, self.codec_config, self.teacher = config, copy.deepcopy(codec_config), teacher
-        if codec.sample_rate != 16000 or codec.hop_length != 400:
-            raise ValueError("the waveform trainer requires a 16 kHz / 40 Hz codec")
-        if config.semantic_weight and (teacher is None or not codec.distill):
-            raise ValueError("semantic training requires a real teacher and codec distill=true")
-        if teacher is not None and teacher.hidden_size != codec.distill_hidden_dim:
-            raise ValueError("teacher hidden_size must match codec distill_hidden_dim")
+        self.config, self.codec_config = config, copy.deepcopy(codec.codec_config)
+        if codec.sample_rate != AUDIO_SAMPLE_RATE or codec.hop_length != LATENT_HOP_LENGTH:
+            raise ValueError("the waveform trainer requires a 48 kHz / 50 Hz SARA codec")
         self.codec = codec.to(self.device)
         self.discriminator = SpeechDiscriminator(periods=config.periods, fft_sizes=config.fft_sizes,
                                                 bands=config.bands, channels=config.discriminator_channels).to(self.device)
-        self.reconstruction = SpectralReconstructionLoss(fft_sizes=config.fft_sizes, n_mels=config.n_mels).to(self.device)
-        self.optimizer = torch.optim.Adam(self.codec.parameters(), lr=config.learning_rate)
-        self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=config.learning_rate)
-        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=config.lr_decay)
-        self.discriminator_scheduler = torch.optim.lr_scheduler.ExponentialLR(self.discriminator_optimizer, gamma=config.lr_decay)
+        self.reconstruction = SpectralReconstructionLoss(sample_rate=AUDIO_SAMPLE_RATE,
+            fft_sizes=config.fft_sizes, n_mels=config.n_mels).to(self.device)
+        self.trainable_parameters = [parameter for parameter in self.codec.parameters() if parameter.requires_grad]
+        self.optimizer = torch.optim.AdamW(self.trainable_parameters, lr=config.learning_rate,
+                                          weight_decay=config.weight_decay)
+        self.discriminator_optimizer = torch.optim.AdamW(self.discriminator.parameters(), lr=config.learning_rate,
+                                                        weight_decay=config.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, self._lr_factor)
+        self.discriminator_scheduler = torch.optim.lr_scheduler.LambdaLR(self.discriminator_optimizer, self._lr_factor)
         self.scaler = torch.amp.GradScaler(self.device.type, enabled=config.precision == "fp16")
-        self.ema = {key: value.detach().clone() for key, value in self.codec.state_dict().items()}
+        self.ema = {key: value.detach().clone() for key, value in trainable_state(self.codec.state_dict()).items()}
         self.completed_epochs, self.global_step, self.best_validation = 0, 0, math.inf
+
+    def _lr_factor(self, step):
+        warmup = self.config.warmup_steps
+        if step < warmup:
+            return (step + 1) / warmup
+        return self.config.lr_decay ** (step - warmup)
 
     def _autocast(self):
         return torch.autocast(self.device.type, enabled=self.config.precision != "none",
@@ -152,13 +161,14 @@ class Trainer:
 
     def _objective(self, output, real, real_outputs, fake_outputs):
         reconstruction = self.reconstruction(output["audio"], real)
-        kl, semantic = output["vae/kl_loss"], output["vae/proj_loss"]
+        kl = output["vae/kl_loss"]
         adversarial = generator_adversarial_loss(fake_outputs)
         feature = feature_matching_loss(real_outputs, fake_outputs)
         cfg = self.config
-        loss = (cfg.reconstruction_weight * reconstruction + cfg.kl_weight * kl +
-                cfg.semantic_weight * semantic + cfg.adversarial_weight * adversarial + cfg.feature_weight * feature)
-        return {"loss": loss, "reconstruction": reconstruction, "kl": kl, "semantic": semantic,
+        warmup = min(1., (self.global_step + 1) / max(1, cfg.warmup_steps))
+        loss = (cfg.reconstruction_weight * reconstruction + cfg.kl_weight * warmup * kl +
+                cfg.adversarial_weight * adversarial + cfg.feature_weight * feature)
+        return {"loss": loss, "reconstruction": reconstruction, "kl": kl,
                 "adversarial": adversarial, "feature_matching": feature}
 
     def _backward_step(self, loss, optimizer, parameters):
@@ -190,12 +200,11 @@ class Trainer:
         self.discriminator.train().requires_grad_(True)
         totals, count = {}, 0
         for cpu_audio in self._loader(dataset, epoch=epoch, shuffle=True):
-            guidance = self.teacher(cpu_audio) if self.teacher is not None else None
             audio = cpu_audio.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
             self.discriminator_optimizer.zero_grad(set_to_none=True)
             with self._autocast():
-                output = self.codec(audio, sample_rate=16000, guidance=guidance)
+                output = self.codec(audio, sample_rate=AUDIO_SAMPLE_RATE)
                 d_loss = discriminator_loss(self.discriminator(audio), self.discriminator(output["audio"].detach()))
             self._backward_step(d_loss, self.discriminator_optimizer, self.discriminator.parameters())
             self.discriminator_optimizer.zero_grad(set_to_none=True)
@@ -206,20 +215,20 @@ class Trainer:
                         real_outputs = self.discriminator(audio)
                     fake_outputs = self.discriminator(output["audio"])
                     metrics = self._objective(output, audio, real_outputs, fake_outputs)
-                self._backward_step(metrics["loss"], self.optimizer, self.codec.parameters())
+                self._backward_step(metrics["loss"], self.optimizer, self.trainable_parameters)
             finally:
                 self.discriminator.requires_grad_(True)
             self.scaler.update()
             self._update_ema()
             self.global_step += 1
+            self.scheduler.step()
+            self.discriminator_scheduler.step()
             metrics["discriminator"] = d_loss
             values = torch.stack([value.detach().float() for value in metrics.values()]).cpu().tolist()
             batch = len(cpu_audio)
             for key, value in zip(metrics, values):
                 totals[key] = totals.get(key, 0.0) + value * batch
             count += batch
-        self.scheduler.step()
-        self.discriminator_scheduler.step()
         return {key: value / count for key, value in totals.items()}
 
     @torch.no_grad()
@@ -239,11 +248,11 @@ class Trainer:
                 self.discriminator.eval()
                 totals, count = {}, 0
                 for cpu_audio in self._loader(dataset, epoch=0, shuffle=False):
-                    guidance = self.teacher(cpu_audio) if self.teacher is not None else None
                     audio = cpu_audio.to(self.device, non_blocking=True)
                     with self._autocast():
-                        output = torch.func.functional_call(self.codec, self.ema, (audio,),
-                                                            {"sample_rate": 16000, "guidance": guidance}, strict=True)
+                        metrics_state = self.ema
+                        output = torch.func.functional_call(self.codec, metrics_state, (audio,),
+                                                            {"sample_rate": AUDIO_SAMPLE_RATE}, strict=False)
                         metrics = self._objective(output, audio, self.discriminator(audio), self.discriminator(output["audio"]))
                     values = torch.stack([value.float() for value in metrics.values()]).cpu().tolist()
                     if not all(math.isfinite(value) for value in values):
@@ -263,7 +272,6 @@ class Trainer:
             "svae_format_version": self.format_version, "config": self.config.resume_settings(),
             "target_epochs": self.config.epochs,
             "codec_config": self.codec_config, "data_signature": data_signature,
-            "teacher_signature": self.teacher.signature if self.teacher is not None else None,
             "state_dict": self.codec.state_dict(), "discriminator": self.discriminator.state_dict(),
             "optimizer": self.optimizer.state_dict(), "discriminator_optimizer": self.discriminator_optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(), "discriminator_scheduler": self.discriminator_scheduler.state_dict(),
@@ -276,12 +284,11 @@ class Trainer:
         _atomic_save(checkpoint, path)
 
     def restore(self, path, *, data_signature):
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        expected = (self.config.resume_settings(), self.codec_config, data_signature,
-                    self.teacher.signature if self.teacher is not None else None)
-        actual = tuple(checkpoint.get(key) for key in ("config", "codec_config", "data_signature", "teacher_signature"))
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        expected = (self.config.resume_settings(), self.codec_config, data_signature)
+        actual = tuple(checkpoint.get(key) for key in ("config", "codec_config", "data_signature"))
         if checkpoint.get("svae_format_version") != self.format_version or expected != actual:
-            raise ValueError("SVAE checkpoint config, codec, data or teacher differs from this run")
+            raise ValueError("SARA checkpoint config, codec or data differs from this run")
         rng = checkpoint["accelerator_rng"]
         if rng["backend"] != backend_name(self.device) or rng["index"] != self.device.index:
             raise ValueError("SVAE resume requires the original backend and device index")

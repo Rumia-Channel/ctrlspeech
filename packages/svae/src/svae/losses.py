@@ -7,7 +7,7 @@ from torch.nn import functional as F
 
 
 class SpectralReconstructionLoss(nn.Module):
-    def __init__(self, sample_rate=16000, fft_sizes=(2048, 1024, 512), n_mels=80):
+    def __init__(self, sample_rate=48000, fft_sizes=(4096, 2048, 1024), n_mels=80):
         super().__init__()
         if not fft_sizes or any(type(n) is not int or n < 16 for n in fft_sizes):
             raise ValueError("fft_sizes must contain integers >=16")
