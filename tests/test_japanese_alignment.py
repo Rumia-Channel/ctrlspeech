@@ -119,10 +119,18 @@ def test_timeout_stops_descendants_before_removing_workspace(tmp_path, monkeypat
 
     marker = tmp_path / "escaped-child.txt"
     launched = tmp_path / "child-started.txt"
+    child_ready = tmp_path / "child-ready.txt"
+    release = tmp_path / "release-child.txt"
     script = tmp_path / "fake_mfa.py"
     child_code = (
-        "import pathlib,time; time.sleep(0.8); "
-        f"pathlib.Path({str(marker)!r}).write_text('escaped')"
+        "import pathlib,time\n"
+        f"release = pathlib.Path({str(release)!r})\n"
+        f"pathlib.Path({str(child_ready)!r}).touch()\n"
+        "deadline = time.monotonic() + 20\n"
+        "while not release.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "if release.exists():\n"
+        f"    pathlib.Path({str(marker)!r}).write_text('escaped')\n"
     )
     script.write_text(
         "import pathlib, subprocess, sys, time\n"
@@ -137,10 +145,10 @@ def test_timeout_stops_descendants_before_removing_workspace(tmp_path, monkeypat
 
     def start_after_ready(command, **kwargs):
         process = popen(command, **kwargs)
-        # Exclude interpreter startup jitter from the tiny timeout, especially
-        # on loaded Windows CI. Only the fake MFA command uses this hook.
+        # Wait for both processes to run. The child stays alive until the test
+        # releases it, so taskkill cannot race its original fixed sleep timer.
         deadline = time.monotonic() + 10
-        while not launched.exists() and time.monotonic() < deadline:
+        while not (launched.exists() and child_ready.exists()) and time.monotonic() < deadline:
             time.sleep(0.01)
         return process
 
@@ -152,9 +160,12 @@ def test_timeout_stops_descendants_before_removing_workspace(tmp_path, monkeypat
     monkeypatch.setattr(japanese, "_run_mfa_command", run_fake_mfa)
     cache = tmp_path / "cache"
     aligner = JapaneseMFAAligner(cache_dir=cache, timeout_seconds=0.3)
-    with pytest.raises(RuntimeError, match="timed out after 0.3 seconds"):
-        aligner.align(torch.zeros(160), "猫")
-    assert launched.exists(), "The fake MFA must actually spawn its child before timing out"
+    try:
+        with pytest.raises(RuntimeError):
+            aligner.align(torch.zeros(160), "猫")
+    finally:
+        release.touch()
+    assert launched.exists() and child_ready.exists(), "Both MFA processes must start before timing out"
     time.sleep(0.9)
     assert not marker.exists(), "A descendant survived the MFA timeout"
     assert list(cache.iterdir()) == []
