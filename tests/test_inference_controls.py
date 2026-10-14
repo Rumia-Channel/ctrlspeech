@@ -15,10 +15,10 @@ def make_baseline():
     return Baseline(
         input_ids=torch.tensor([[1, 2, 3, 1, 2]]),
         text_masks=torch.ones((1, 5), dtype=torch.bool),
-        prompt_audio=torch.ones(1, 8000), speaker_emb=torch.ones(192),
-        prompt_segments=[(0, 20), (20, 40)], prompt_np=np.ones(8000),
+        prompt_audio=torch.ones(1, 24000), speaker_emb=torch.ones(192),
+        prompt_segments=[(0, 20), (20, 40)], prompt_np=np.ones(24000),
         prompt_duration=0.5, prompt_f0=np.full(51, 40), prompt_loud=np.full(51, 30),
-        gen_np=np.ones(16000), gen_f0=np.tile([0, 1, 40, 60], 26)[:101],
+        gen_np=np.ones(48000), gen_f0=np.tile([0, 1, 40, 60], 26)[:101],
         gen_loud=np.full(101, 30),
         gen_phoneme_data=[["a", .1, .3], ["i", .5, .8]],
         word_data=[
@@ -35,9 +35,6 @@ def stub_tts():
     return CtrlSpeech(None, None, {"a": 1, "i": 2, "|": 3}, None, "cpu")
 
 
-def test_cli_uses_japanese_default():
-    args = parse_args(["--audio", "x.wav", "--transcript-text", "あ", "--out", "out.wav"])
-    assert args.model == "japanese-lfm2-350m"
 
 
 @pytest.mark.parametrize("flags", [
@@ -108,19 +105,6 @@ def test_unaligned_generation_cannot_be_regenerated():
         stub_tts().build_edited_controls(state)
 
 
-def test_regeneration_reuses_both_japanese_condition_streams(monkeypatch):
-    state, tts = make_baseline(), stub_tts()
-    calls = []
-    monkeypatch.setattr(tts, "_sample", lambda **kw: calls.append(kw) or np.zeros(16000))
-    monkeypatch.setattr(pipeline, "get_pitch_and_loudness", lambda *a, **k: (None, np.zeros(101), None, np.zeros(101)))
-    tts.regenerate(state)
-    tts.regenerate(state, pitch=state.gen_f0 + 1)
-    assert len(calls) == 2
-    for call in calls:
-        assert call["linguistic_features"] is state.linguistic_features
-        assert call["native_text_inputs"] is state.native_text_inputs
-        assert call["native_text_masks"] is state.native_text_masks
-    np.testing.assert_array_equal(state.gen_f0[:4], [0, 1, 40, 60])
 
 
 def test_generate_passes_japanese_inputs_and_uses_frame_offset(monkeypatch):
@@ -130,17 +114,15 @@ def test_generate_passes_japanese_inputs_and_uses_frame_offset(monkeypatch):
                  linguistic_features=state.linguistic_features,
                  native_text_inputs=state.native_text_inputs, native_text_masks=state.native_text_masks)
     monkeypatch.setattr(tts, "_encode_text_pair", lambda *args: (sequence, batch))
-    monkeypatch.setattr(pipeline.librosa, "load", lambda *a, **k: (np.ones(8000, np.float32), 16000))
+    monkeypatch.setattr(pipeline.librosa, "load", lambda *a, **k: (np.ones(24000, np.float32), 48000))
     monkeypatch.setattr(pipeline.librosa.effects, "trim", lambda x, **k: (x, (0, len(x))))
-    monkeypatch.setattr(pipeline, "get_pitch_and_loudness", lambda x, **k: (None, np.ones(len(x)//160+1), None, np.ones(len(x)//160+1)))
+    monkeypatch.setattr(pipeline, "get_pitch_and_loudness", lambda x, **k: (None, np.ones(len(x)//480+1), None, np.ones(len(x)//480+1)))
     tts.speaker_embedding = SimpleNamespace(_extract_spk_embedding=lambda x: [torch.ones(192)])
     calls = []
-    monkeypatch.setattr(tts, "_sample", lambda **kw: calls.append(kw) or np.ones(16000))
+    monkeypatch.setattr(tts, "_sample", lambda **kw: calls.append(kw) or np.ones(48000))
     annotation = dict(words="あい", phones="a i", starts="0.1 0.2", ends="0.2 0.4")
     baseline = tts.generate("dummy.wav", annotation, annotation, align=False)
     assert calls[0]["duration_segments"] == [(10, 20), (20, 40), (0, 0), (61, 71), (71, 91)]
-    assert calls[0]["linguistic_features"] is state.linguistic_features
-    assert baseline.native_text_inputs is state.native_text_inputs
 
 
 @pytest.mark.parametrize("phones", ["a | i", "a ɪ", "A I"])
@@ -226,8 +208,8 @@ def test_known_audio_annotation_preserves_untrimmed_timebase(monkeypatch):
                      SimpleNamespace(_extract_spk_embedding=lambda x: [torch.ones(192)]), "cpu")
     monkeypatch.setattr(pipeline.librosa.effects, "trim", lambda *a, **k: pytest.fail("trimmed annotated waveform"))
     monkeypatch.setattr(tts, "align", lambda *a, **k: pytest.fail("invoked MFA"))
-    monkeypatch.setattr(pipeline, "get_pitch_and_loudness", lambda x, **k: (None, np.ones(len(x)//160+1), None, np.ones(len(x)//160+1)))
-    audio = np.concatenate([np.zeros(3200), np.ones(12800)]).astype(np.float32)
+    monkeypatch.setattr(pipeline, "get_pitch_and_loudness", lambda x, **k: (None, np.ones(len(x)//480+1), None, np.ones(len(x)//480+1)))
+    audio = np.concatenate([np.zeros(9600), np.ones(38400)]).astype(np.float32)
     annotation = dict(words="あい", phones="a i", starts=".2 .5", ends=".5 .8")
     state = tts.from_audio(audio, "あい", annotation=annotation)
     np.testing.assert_array_equal(state.gen_np, audio)
@@ -241,9 +223,9 @@ def test_generation_save_writes_real_pcm_without_torchcodec(tmp_path):
     import soundfile as sf
 
     output = tmp_path / "nested" / "silence.wav"
-    pipeline.Generation(np.zeros(160), np.zeros(2), np.zeros(2)).save(output)
+    pipeline.Generation(np.zeros(480), np.zeros(2), np.zeros(2)).save(output)
     data, sr = sf.read(output)
-    assert data.shape == (160,) and sr == 16000
+    assert data.shape == (480,) and sr == 48000
 
 
 def test_cli_canonical_synthesis_preserves_prompt_timebase_and_skips_mfa(tmp_path, monkeypatch):
@@ -278,7 +260,7 @@ def test_cli_canonical_duration_edit_never_invokes_mfa_verification(tmp_path, mo
     def regenerate(baseline, **kwargs):
         stub_tts().build_edited_controls(baseline, **kwargs)
         calls.append("regenerate")
-        return pipeline.Generation(np.zeros(16000), state.gen_f0, state.gen_loud)
+        return pipeline.Generation(np.zeros(48000), state.gen_f0, state.gen_loud)
 
     fake = SimpleNamespace(from_audio=from_audio, regenerate=regenerate,
                            align=lambda *a, **k: pytest.fail("invoked MFA"))

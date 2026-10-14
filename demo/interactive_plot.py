@@ -83,7 +83,7 @@ def _waveform_envelope(waveform, sample_rate, max_columns=2400):
 
 
 def apply_phoneme_edit_to_data(pitch_data, loudness_data, original_phonemes,
-                               new_phonemes, hop_length=256, sample_rate=24000,
+                               new_phonemes, hop_length=480, sample_rate=48000,
                                changed_idx=None):
     """
     Apply phoneme duration changes to pitch and loudness data.
@@ -341,8 +341,8 @@ def interactive_dual_plot_bokeh(
     pitch_data,
     loudness_data,
     phoneme_data=None,
-    hop_length: int = 256,
-    sample_rate: int = 24000,
+    hop_length: int = 480,
+    sample_rate: int = 48000,
     pitch_title: str = "Pitch",
     loudness_title: str = "Loudness",
     plot_width: int = 900,
@@ -1440,10 +1440,10 @@ def interactive_dual_plot_bokeh(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Demo (run as script: python -m inference.interactive_plot_bokeh)
+# Demo (run as script: python -m demo.interactive_plot)
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    hop_length, sample_rate = 256, 24_000
+    hop_length, sample_rate = 480, 48_000
     n = int(2.0 * sample_rate / hop_length)
     t = np.linspace(0, 4 * np.pi, n)
 

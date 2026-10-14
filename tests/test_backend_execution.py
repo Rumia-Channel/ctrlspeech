@@ -1,6 +1,6 @@
-"""Real small LFM2/DiT/SVAE paths; set CTRLSPEECH_TEST_DEVICE to require a GPU.
+"""Real small LFM2/DiT/SARA paths; set CTRLSPEECH_TEST_DEVICE to require a GPU.
 
-Weights and audio are synthetic. No SVAE encoder, sampler, decoder or optimizer
+Weights and audio are synthetic. No codec encoder, sampler, decoder or optimizer
 is mocked; LFM2's architecture is reduced and CPU speaker embeddings are cached.
 """
 
@@ -18,8 +18,8 @@ from ctrlspeech.assets import Assets, MODELS
 from ctrlspeech.data import collate_japanese_sequences, encode_japanese_pair
 from ctrlspeech.models.backbone import LFM2SpeechBackbone
 from ctrlspeech.models.ditar import DiTar
-from svae.models.dac.model import DAC
-from svae.loading import build_encoder, encode_audio
+from svae.loading import build_codec, encode_audio, load_encoder
+from svae.training.engine import export_codec
 from ctrlspeech.pipeline import CtrlSpeech
 from svae.runtime import accelerator_module, resolve_device
 from ctrlspeech.training import CachedSpeechDataset
@@ -28,7 +28,7 @@ from ctrlspeech.training.engine import Trainer, TrainingConfig, TrainingStage, s
 
 
 @pytest.fixture
-def backend_assets(tmp_path, monkeypatch):
+def backend_assets(tmp_path, monkeypatch, small_codec_config):
     from ctrlspeech.models import ditar
 
     backbone_config = Lfm2Config(
@@ -55,39 +55,29 @@ def backend_assets(tmp_path, monkeypatch):
     })
     model_config.model.loc_decoder.model.update({"dim": 32, "depth": 1, "heads": 2, "dim_head": 16})
     svae = tmp_path / "svae"
-    (svae / "dac").mkdir(parents=True)
-    dac_config = {
-        "encoder_dim": 4, "encoder_rates": [4, 4, 5, 5], "latent_dim": 64,
-        "decoder_dim": 64, "decoder_rates": [5, 5, 4, 4], "vae_dim": 64,
-        "sample_rate": 16000, "decoder_type": "dac", "distill_hidden_dim": 16,
-    }
-    (svae / "metainfo.json").write_text(json.dumps({"DAC": dac_config}), encoding="utf-8")
     seed_training(7)
-    codec = DAC(**dac_config).eval()
-    torch.save({"ema_model." + key: value for key, value in codec.state_dict().items()},
-               svae / "dac" / "ema_state_dict.pth")
-    encoder = build_encoder(svae)
-    encoder.load_state_dict({key: value for key, value in codec.state_dict().items()
-                             if not key.startswith(("projectors.", "decoder.", "decoder_proj."))}, strict=True)
-    weights = tmp_path / "encoder.pt"
-    torch.save(encoder.state_dict(), weights)
+    codec = build_codec(small_codec_config).eval()
+    export_codec(codec.codec_config, codec.state_dict(), codec.state_dict(), svae)
+    encoder = load_encoder(svae)
+    weights = svae / "encoder.safetensors"
     model_config.model.vocoder.path = str(svae)
     config_path = tmp_path / "model.yaml"
     OmegaConf.save(model_config, config_path)
-    prompt = torch.sin(torch.arange(1600, dtype=torch.float32) * (2 * torch.pi * 220 / 16000))[None] * 0.1
-    target = torch.sin(torch.arange(2000, dtype=torch.float32) * (2 * torch.pi * 330 / 16000))[None] * 0.1
+    prompt = torch.sin(torch.arange(3840, dtype=torch.float32) * (2 * torch.pi * 220 / 48000))[None] * 0.1
+    target = torch.sin(torch.arange(4800, dtype=torch.float32) * (2 * torch.pi * 330 / 48000))[None] * 0.1
     sequence = encode_japanese_pair("あ", "い")
     text = collate_japanese_sequences([sequence])
     prompt_latents = encode_audio(prompt[:, None], encoder).transpose(1, 2)[0]
     target_latents = encode_audio(target[:, None], encoder).transpose(1, 2)[0]
-    controls = torch.arange(23, dtype=torch.long)
+    controls = torch.arange(20, dtype=torch.long)
     bounds = []
-    for start, end, count in ((0, 10, len(sequence.prompt.phones)), (10, 23, len(sequence.target.phones))):
+    for start, end, count in ((0, 8, len(sequence.prompt.phones)), (9, 19, len(sequence.target.phones))):
         if start:
             bounds.append((0, 0))
         boundaries = np.linspace(start, end, count + 1, dtype=int)
         bounds.extend(zip(boundaries[:-1].tolist(), boundaries[1:].tolist()))
     example = {
+        "codec": {"name": "sara", "sample_rate": 48000, "latent_fps": 50, "latent_dim": 128},
         "vae_features": torch.cat((prompt_latents, target_latents)),
         "prompt_frames": len(prompt_latents), "speaker_embs": torch.zeros(192),
         "text_inputs": text["text_inputs"][0],
@@ -161,33 +151,35 @@ def test_real_cli_training_resume_and_waveform_inference(backend_assets, tmp_pat
     audio = pipeline._sample(**arguments)
     seed_training(17)
     repeated = pipeline._sample(**arguments)
-    assert audio.shape == (3200,)  # Two 0.1-second AR patches, decoded at 16 kHz.
+    assert audio.shape == (7680,)  # Two 80 ms AR patches decoded natively at 48 kHz.
     assert np.isfinite(audio).all()
     np.testing.assert_allclose(audio, repeated, rtol=1e-4, atol=1e-5)
     wav = tmp_path / "generated.wav"
-    sf.write(wav, audio, 16000, subtype="FLOAT")
+    sf.write(wav, audio, 48000, subtype="FLOAT")
     decoded, rate = sf.read(wav, dtype="float32")
-    assert rate == 16000
+    assert rate == 48000
     np.testing.assert_array_equal(decoded, audio)
 
 
-def test_bigvgan_native_decoder_preserves_the_40hz_audio_clock():
-    from svae.models.dac.model.bigvgan import AttrDict, BigVGAN
+def test_hifigan_native_decoder_preserves_the_50hz_audio_clock(small_codec_config):
+    from svae.models.sara import SARADecoder
 
     device = resolve_device(os.environ.get("CTRLSPEECH_TEST_DEVICE", "auto"))
-    config = AttrDict(
-        resblock="1", num_mels=64, upsample_initial_channel=64,
-        upsample_rates=[5, 5, 2, 2, 2, 2],
-        upsample_kernel_sizes=[9, 9, 4, 4, 4, 4],
-        resblock_kernel_sizes=[3], resblock_dilation_sizes=[[1, 3, 5]],
-        activation="snakebeta", snake_logscale=True,
-        use_tanh_at_final=False, use_bias_at_final=False,
-    )
-    vocoder = BigVGAN(config).to(device).eval()
-    latents = torch.randn(1, 64, 8, device=device)
+    vocoder = SARADecoder(small_codec_config).to(device).eval()
+    latents = torch.randn(1, 8, 128, device=device)
     with torch.no_grad():
-        audio = vocoder(latents)
-        changed = vocoder(latents + 0.1)
-    assert audio.shape == (1, 1, 3200)
+        audio = vocoder.decode(latents)
+        changed = vocoder.decode(latents + 0.1)
+    assert audio.shape == (1, 1, 7680)
     assert torch.isfinite(audio).all()
     assert not torch.equal(audio, changed)
+
+
+@pytest.mark.parametrize("component", ["codec", "local_decoder"])
+def test_tts_rejects_inconsistent_latent_dimensions(backend_assets, component):
+    config = OmegaConf.create(OmegaConf.to_container(backend_assets[0], resolve=True)).model
+    config.audio_channels = 64
+    if component == "codec":
+        config.loc_decoder.model.out_dim = 64
+    with pytest.raises(ValueError):
+        DiTar(config)

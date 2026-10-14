@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from svae.runtime import accelerator_module, backend_name, resolve_device, validate_training_precision
+from svae.constants import LATENT_FRAMES_PER_SECOND
 from .data import LengthBucketBatchSampler, collate_speech_examples
 
 
@@ -50,7 +51,7 @@ class TrainingConfig:
     num_workers: int = 0
     seed: int = 42
     validation_seed: int = 1234
-    latent_fps: int = 40
+    latent_fps: int = LATENT_FRAMES_PER_SECOND
     gradient_checkpointing: bool = True
     loss_weights: dict[str, float] = field(default_factory=lambda: {
         "diff_loss": 1.0, "stop_loss": 0.1,
@@ -76,8 +77,8 @@ class TrainingConfig:
             raise ValueError("max_grad_norm must be finite and positive")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
             raise ValueError("weight_decay must be finite and nonnegative")
-        if self.latent_fps != 40:
-            raise ValueError("the current SVAE clock is fixed to 40 latent frames/s")
+        if self.latent_fps != LATENT_FRAMES_PER_SECOND:
+            raise ValueError("the SARA clock is fixed to 50 latent frames/s")
         supported = {"diff_loss", "stop_loss", "ar_l1_loss", "vae_projected_l1_loss"}
         if not self.loss_weights or set(self.loss_weights) - supported:
             raise ValueError("loss_weights contains unsupported objectives")
@@ -248,7 +249,7 @@ class Trainer:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
-            "format_version": 2,
+            "format_version": 3,
             "state_dict": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -277,8 +278,8 @@ class Trainer:
 
     def restore(self, path, *, model_config, data_signature):
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if checkpoint.get("format_version") != 2:
-            raise ValueError("unsupported training checkpoint format")
+        if checkpoint.get("format_version") != 3:
+            raise ValueError("unsupported training checkpoint format; retrain old 40 Hz models with SARA")
         if checkpoint["training_config"] != asdict(self.config) or checkpoint["model_config"] != model_config:
             raise ValueError("resume requires the original training and model configuration")
         if checkpoint["data_signature"] != data_signature:

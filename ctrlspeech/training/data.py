@@ -12,6 +12,10 @@ from torch.utils.data import Dataset, Sampler
 
 from ..frontend import JAPANESE_PHONE_TO_ID
 from ..models.embeds import JapaneseLinguisticConditioner
+from svae.constants import AUDIO_SAMPLE_RATE, LATENT_FRAMES_PER_SECOND, DEFAULT_LATENT_DIM
+
+CODEC_PROFILE = {"name": "sara", "sample_rate": AUDIO_SAMPLE_RATE,
+                 "latent_fps": LATENT_FRAMES_PER_SECOND, "latent_dim": DEFAULT_LATENT_DIM}
 
 
 def _tensor(values, name):
@@ -20,10 +24,12 @@ def _tensor(values, name):
     return values
 
 
-def validate_example(example, *, patch_size=4, audio_channels=64):
+def validate_example(example, *, patch_size=4, audio_channels=DEFAULT_LATENT_DIM):
     """Reject misaligned or invalid caches before they reach the model."""
     if not isinstance(example, Mapping):
         raise ValueError("feature cache must be a dictionary")
+    if example.get("codec") != {**CODEC_PROFILE, "latent_dim": audio_channels}:
+        raise ValueError("incompatible feature cache: regenerate with SARA 48 kHz / 50 Hz and matching latent dimension")
     if type(patch_size) is not int or patch_size < 1:
         raise ValueError("patch_size must be a positive integer")
     if type(audio_channels) is not int or audio_channels < 1:
@@ -111,7 +117,7 @@ def validate_example(example, *, patch_size=4, audio_channels=64):
 class CachedSpeechDataset(Dataset):
     """JSONL manifest containing path, frames and speaker_id per cache file."""
 
-    def __init__(self, manifest, *, patch_size=4, audio_channels=64):
+    def __init__(self, manifest, *, patch_size=4, audio_channels=DEFAULT_LATENT_DIM):
         self.manifest = Path(manifest).resolve()
         self.patch_size = patch_size
         self.audio_channels = audio_channels

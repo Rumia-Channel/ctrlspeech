@@ -22,6 +22,7 @@ from pathlib import Path
 import librosa
 import numpy as np
 import torch
+import torchaudio
 from omegaconf import OmegaConf
 
 from .align import JapaneseMFAAligner
@@ -38,9 +39,10 @@ from .retime import (
     time_to_frame_index,
 )
 from svae.runtime import resolve_device
+from svae.constants import AUDIO_SAMPLE_RATE, LATENT_FRAMES_PER_SECOND
 
-SAMPLE_RATE = 16000
-HOP_LENGTH = 160                    # 100 frames/s, matching the *100 in duration_segments
+SAMPLE_RATE = AUDIO_SAMPLE_RATE
+HOP_LENGTH = SAMPLE_RATE // 100     # Controls remain on a separate 100 Hz clock.
 FPS = SAMPLE_RATE // HOP_LENGTH     # = 100
 PITCH_BINS = 128
 LOUDNESS_BINS = 64
@@ -51,9 +53,8 @@ LOUDNESS_BINS_PER_DB = (LOUDNESS_BINS - 1) / LOUDNESS_DB_RANGE   # ~1.05 bin/dB
 MAX_PHONE_FRAMES = MAX_DURATION_FRAMES
 MAX_CONTROL_FRAMES = MAX_TIMELINE_FRAMES
 
-# The SVAE encoder rates [4,4,5,5] give 400 samples per latent -> 40 Hz, and the
-# AR model emits patch_size latents per step, so one step is 0.1 s of audio.
-VAE_FRAMES_PER_SECOND = 40
+# SARA's 960-sample hop gives 50 Hz; four latents form an 80 ms AR patch.
+VAE_FRAMES_PER_SECOND = LATENT_FRAMES_PER_SECOND
 AR_PATCH_SIZE = 4
 AR_STEP_SECONDS = AR_PATCH_SIZE / VAE_FRAMES_PER_SECOND
 
@@ -147,7 +148,7 @@ def _validate_sampling(steps, cfg_strength):
 def _validate_audio(audio):
     audio = np.asarray(audio, dtype=np.float32)
     if audio.ndim != 1 or not audio.size or not np.all(np.isfinite(audio)):
-        raise ValueError("audio must be a nonempty finite mono waveform at 16 kHz")
+        raise ValueError("audio must be a nonempty finite mono waveform at 48 kHz")
     return audio
 
 
@@ -366,6 +367,7 @@ class CtrlSpeech:
         aligner = self.aligner
         # Its expected-phone contract uses the raw MFA inventory, not OpenJTalk.
         raw_expected = None if isinstance(aligner, JapaneseMFAAligner) else expected_phones
+        waveform = torchaudio.functional.resample(waveform.detach().float().cpu(), SAMPLE_RATE, 16000)
         result = aligner.align(waveform, transcript, raw_expected)
         if expected_phones is not None:
             _require_canonical_phones(result, expected_phones.split(), "alignment")
@@ -491,7 +493,7 @@ class CtrlSpeech:
         has the same shape as :meth:`generate` and the caller need not care
         which path produced it.
 
-        ``audio`` is a path or a mono float array already at 16 kHz.
+        ``audio`` is a path or a mono float array already at 48 kHz.
         An optional canonical four-line ``annotation`` bypasses MFA. Its times
         refer to the full recording: silence is not trimmed in this mode.
         """
@@ -749,7 +751,9 @@ def _load_state_dict(path):
         from safetensors.torch import load_file
 
         return load_file(str(path))
-    checkpoint = torch.load(str(path), map_location="cpu", weights_only=True)
+    checkpoint = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
+    if "format_version" in checkpoint and checkpoint["format_version"] != 3:
+        raise ValueError("incompatible TTS checkpoint: retrain with 48 kHz / 50 Hz SARA features")
     return checkpoint.get("state_dict", checkpoint)
 
 

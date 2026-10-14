@@ -3,7 +3,7 @@
 Everything is fetched from one Hugging Face repo, laid out as::
 
     <model>/{config.yaml, model.safetensors}
-    svae/{metainfo.json, config.json, dac/{ema_state_dict.pth, weights.pth}}
+    svae/{metainfo.json, encoder.safetensors, weights.safetensors, ema.safetensors}
     shared/{vocab.json, campplus.onnx}
 
 Set ``CTRLSPEECH_ASSETS`` to a directory with that same layout to work fully
@@ -86,7 +86,8 @@ def _verify(assets):
             assets.config_path,
             assets.weights_path,
             assets.svae_dir / "metainfo.json",
-            assets.svae_dir / "dac" / "ema_state_dict.pth",
+            assets.svae_dir / "encoder.safetensors",
+            assets.svae_dir / "ema.safetensors",
             assets.vocab_path,
             assets.campplus_path,
         )

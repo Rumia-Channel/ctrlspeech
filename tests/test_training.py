@@ -41,7 +41,11 @@ def tiny_model(monkeypatch):
             load_pretrained_weights=False, validate_architecture=False,
         )
     monkeypatch.setattr(ditar, "LFM2SpeechBackbone", backbone)
-    monkeypatch.setattr(ditar, "build_encoder", lambda *args: nn.Sequential(nn.Linear(1, 1), nn.Dropout(0.5)))
+    def encoder(*args):
+        result = nn.Sequential(nn.Linear(1, 1), nn.Dropout(0.5))
+        result.vae_dim = config.audio_channels
+        return result
+    monkeypatch.setattr(ditar, "build_encoder", encoder)
     seed_training(7)
     return DiTar(config)
 
@@ -49,7 +53,8 @@ def tiny_model(monkeypatch):
 def example(frames=9, *, native=False, controls=False):
     phones = torch.tensor([JAPANESE_PHONE_TO_ID[phone] for phone in ("a", "|", "i", "u")])
     result = {
-        "vae_features": torch.randn(frames, 64),
+        "codec": {"name": "sara", "sample_rate": 48000, "latent_fps": 50, "latent_dim": 128},
+        "vae_features": torch.randn(frames, 128),
         "speaker_embs": torch.randn(192),
         "text_inputs": phones,
         "prompt_frames": 4,
@@ -174,13 +179,13 @@ def test_short_text_predicts_first_patch_from_last_valid_phone(tiny_model):
 @pytest.mark.parametrize("strategy", ["only_drop_ctx", "drop_ctx_or_his", "drop_ctx_and_his"])
 def test_sampling_supports_all_cfg_modes_and_short_prompt(tiny_model, monkeypatch, strategy):
     from ctrlspeech.models import ditar
-    monkeypatch.setattr(ditar, "encode_audio", lambda *args: torch.randn(1, 64, 2))
+    monkeypatch.setattr(ditar, "encode_audio", lambda *args: torch.randn(1, 128, 2))
     tiny_model.eval()
     tiny_model.drop_condition = strategy
     result = tiny_model.sample(torch.zeros(1, 800), torch.zeros(1, 192),
                                torch.tensor([[2, 3, 4]]), torch.ones(1, 3, dtype=torch.bool),
                                max_seq_length=2, steps=1, use_cache=True)
-    assert result.shape == (1, 8, 64)
+    assert result.shape == (1, 8, 128)
     assert torch.isfinite(result).all()
 
 
@@ -347,6 +352,18 @@ def test_cache_schema_rejects_wrong_types_with_actionable_errors(field, value, m
         validate_example(cached)
 
 
+@pytest.mark.parametrize("codec", [
+    None,
+    {"name": "svae", "sample_rate": 16000, "latent_fps": 40, "latent_dim": 64},
+    {"name": "sara", "sample_rate": 24000, "latent_fps": 50, "latent_dim": 64},
+])
+def test_legacy_feature_clock_is_rejected(codec):
+    cached = example()
+    cached["codec"] = codec
+    with pytest.raises(ValueError):
+        validate_example(cached)
+
+
 def test_cache_root_and_linguistic_fields_require_tensors():
     with pytest.raises(ValueError, match="feature cache must be a dictionary"):
         validate_example([])
@@ -415,7 +432,7 @@ def test_dataset_schema_errors_identify_cache_path(tmp_path):
     manifest = write_dataset(tmp_path, "speaker")
     cache_path = tmp_path / "speaker.pt"
     torch.save({"vae_features": torch.zeros(9, 64)}, cache_path)
-    with pytest.raises(ValueError, match="feature cache is missing") as error:
+    with pytest.raises(ValueError) as error:
         CachedSpeechDataset(manifest)[0]
     assert str(cache_path) in str(error.value)
 
@@ -603,3 +620,12 @@ def test_validation_and_resume_preserve_selected_accelerator_rng(monkeypatch, tm
         resumed.restore(path, model_config={}, data_signature={})
     for name, value in resumed.model.state_dict().items():
         torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+
+
+def test_feature_dimension_must_match_the_selected_model():
+    cached = example()
+    cached["codec"]["latent_dim"] = 64
+    cached["vae_features"] = torch.randn(9, 64)
+    with pytest.raises(ValueError):
+        validate_example(cached)
+    validate_example(cached, audio_channels=64)

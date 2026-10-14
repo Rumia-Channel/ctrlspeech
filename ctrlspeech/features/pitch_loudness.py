@@ -110,7 +110,7 @@ def apply_a_weighting(wav, sr):
 
 
 # ========= 核心提取函数 =========
-def get_pitch(wav, sr=16000, hop_length=320):
+def get_pitch(wav, sr=48000, hop_length=480):
     """
     逐帧提取 pitch (F0)
     
@@ -124,7 +124,7 @@ def get_pitch(wav, sr=16000, hop_length=320):
 
 
 def get_loudness(
-    wav, sr=16000, hop_length=320, 
+    wav, sr=48000, hop_length=480,
     quantize=True, db_max=loudness_db_max, db_floor=loudness_db_floor,
     use_a_weighting=True
 ):
@@ -172,7 +172,7 @@ def get_loudness(
     return loudness_db
 
 
-def get_pitch_and_loudness(wav, sr=16000, hop_length=320, quantize=True):
+def get_pitch_and_loudness(wav, sr=48000, hop_length=480, quantize=True):
     """
     一次性逐帧提取 pitch 和 loudness
     

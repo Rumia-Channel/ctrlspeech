@@ -141,7 +141,7 @@ def test_canonical_annotation_upload_uses_its_transcript_and_skips_temp_leaks(mo
     annotation = "あい\na i\n0 .05\n.05 .1\n".encode("utf-8")
     result = demo.adopt_upload(wav.getvalue(), "silence.wav", "", 32, 1.5, annotation)
     assert result == "baseline"
-    assert calls[0][0][0].shape == (1600,)
+    assert calls[0][0][0].shape == (4800,)
     assert calls[0][0][1] == "あい"
     assert calls[0][1]["annotation"]["starts"] == "0 .05"
 

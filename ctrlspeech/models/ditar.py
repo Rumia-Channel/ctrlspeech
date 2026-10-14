@@ -18,6 +18,7 @@ from .backbone import DEFAULT_LFM2_MODEL_ID, LFM2SpeechBackbone
 from .modules import AggregationEncoder, MLPStopPredictor
 from .backbone.dit import DiT
 from svae.loading import build_encoder, encode_audio
+from svae.constants import AUDIO_SAMPLE_RATE, LATENT_FRAMES_PER_SECOND
 from .training_utils import (
     dropout_condition, flow_matching_path, left_pad_text_prefix, masked_mean,
 )
@@ -58,6 +59,14 @@ class DiTar(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        if (getattr(config, "codec_name", None), getattr(config, "sample_rate", None),
+                getattr(config, "latent_fps", None)) != (
+                "sara", AUDIO_SAMPLE_RATE, LATENT_FRAMES_PER_SECOND):
+            raise ValueError("TTS requires SARA 48 kHz / 50 Hz; regenerate features and retrain old models")
+        if type(config.audio_channels) is not int or config.audio_channels < 1:
+            raise ValueError("audio_channels must be a positive integer")
+        if config.loc_decoder.model.out_dim != config.audio_channels:
+            raise ValueError("LocDiT out_dim must match audio_channels")
         self.audio_channels = config.audio_channels
         self.dim = config.dim
         self.patch_size = config.patch_size
@@ -137,6 +146,8 @@ class DiTar(nn.Module):
         self.audio_type = config.audio_type
         vocoder_path = Path(config.vocoder.path).expanduser()
         generator = build_encoder(vocoder_path).eval()
+        if generator.vae_dim != self.audio_channels:
+            raise ValueError("SARA latent dimension must match TTS audio_channels")
         self.generator = generator
         self.generator.requires_grad_(False)
 

@@ -21,7 +21,7 @@ MAX_TIMELINE_FRAMES = MAX_TARGET_SECONDS * CONTROL_FPS + 1
 MAX_DURATION_FRAMES = MAX_TIMELINE_FRAMES - 1
 
 
-def time_to_frame_index(time_sec, hop_length=256, sample_rate=24000):
+def time_to_frame_index(time_sec, hop_length=480, sample_rate=48000):
     """Round a nonnegative boundary to its nearest frame (ties round up)."""
     if (not np.isfinite(time_sec) or time_sec < 0 or not np.isfinite(hop_length) or
             not np.isfinite(sample_rate) or hop_length <= 0 or sample_rate <= 0):
@@ -112,8 +112,8 @@ def retime_word_curves(
     words,
     word_idx,
     new_duration,
-    hop_length=256,
-    sample_rate=24000,
+    hop_length=480,
+    sample_rate=48000,
 ):
     """Retime one word while preserving every region outside that word.
 

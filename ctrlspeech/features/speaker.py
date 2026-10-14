@@ -6,6 +6,8 @@ import onnxruntime
 import torch
 
 import torchaudio.compliance.kaldi as kaldi
+from torchaudio.transforms import Resample
+from svae.constants import AUDIO_SAMPLE_RATE
 
 
 class CosyVoiceSpeakerEmbedding:
@@ -16,8 +18,10 @@ class CosyVoiceSpeakerEmbedding:
         self.campplus_session = onnxruntime.InferenceSession(
             campplus_model, sess_options=option, providers=["CPUExecutionProvider"]
         )
+        self.resampler = Resample(AUDIO_SAMPLE_RATE, 16000)
 
     def _extract_spk_embedding(self, speech):
+        speech = self.resampler(speech.detach().float().cpu())
         feat = kaldi.fbank(
             speech,
             num_mel_bins=80,

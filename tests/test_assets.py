@@ -4,7 +4,7 @@ from ctrlspeech import assets
 
 def complete_assets(root):
     for name in ('japanese-lfm2-350m/config.yaml', 'japanese-lfm2-350m/model.safetensors',
-                 'svae/metainfo.json', 'svae/dac/ema_state_dict.pth',
+                 'svae/metainfo.json', 'svae/encoder.safetensors', 'svae/ema.safetensors',
                  'shared/vocab.json', 'shared/campplus.onnx'):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -17,8 +17,8 @@ def test_local_assets_resolve_relative_path_and_require_decoder(tmp_path, monkey
     monkeypatch.setenv('CTRLSPEECH_ASSETS', tmp_path.name)
     result = assets.download_assets()
     assert result.root.is_absolute()
-    (tmp_path / 'svae/dac/ema_state_dict.pth').unlink()
-    with pytest.raises(FileNotFoundError, match='ema_state_dict.pth'):
+    (tmp_path / 'svae/ema.safetensors').unlink()
+    with pytest.raises(FileNotFoundError):
         assets.download_assets()
 
 

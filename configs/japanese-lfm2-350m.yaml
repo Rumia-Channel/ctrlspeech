@@ -1,8 +1,11 @@
 model:
   name: DiTAR
+  codec_name: sara
+  sample_rate: 48000
+  latent_fps: 50
   text_vocab_size: 52
   audio_type: vae_online
-  audio_channels: 64
+  audio_channels: 128
   patch_size: 4
   dim: 1024
   mlp_hidden_dim: 512
@@ -31,7 +34,7 @@ model:
     name: DiT
     model:
       dim: 1024
-      out_dim: 64
+      out_dim: 128
       depth: 6
       heads: 16
       ff_mult: 4

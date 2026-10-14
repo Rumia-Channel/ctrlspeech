@@ -1,12 +1,12 @@
 # Starting recipe; choose epoch counts from held-out synthesis quality.
-# Duration is prompt + target combined, on the 40 Hz latent clock.
+# Duration is prompt + target combined, on the 50 Hz latent clock.
 seed: 42
 validation_seed: 1234
 batch_size: 2
 accumulation_steps: 8
 precision: bf16
 num_workers: 0
-latent_fps: 40
+latent_fps: 50
 gradient_checkpointing: true
 weight_decay: 0.01
 max_grad_norm: 1.0
