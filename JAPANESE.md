@@ -119,8 +119,8 @@ environment.
 
 ```bash
 uv python install 3.11
-uv sync --extra japanese --group dev
-CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run pytest
+uv sync --extra cpu --extra japanese --group dev
+CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run --extra cpu --extra japanese pytest
 ```
 
 CI runs CPU-only Torch/TorchAudio tests on Windows and Linux with the native
@@ -128,6 +128,15 @@ ONNX runtime explicitly isolated. Coverage includes real released-API text-only
 frontend checks, tiny-model training/backward/resume, and stubbed Panel control
 flows. ONNX inference and synthesis quality remain outside these checks. See the
 CPU-only environment command in README.md.
+
+The mutually exclusive `cpu`, `cuda`, `rocm` and `xpu` extras select the
+Torch/TorchAudio binary profile at sync time. See [README.md](README.md#install)
+for wheel versions, Windows/Linux driver prerequisites and an explicit-GPU
+execution check. Training and inference share auto selection and explicit
+`cpu`, `cuda[:N]`, `rocm[:N]` and `xpu[:N]` devices. ROCm uses the CUDA API;
+XPU uses its own AMP, scaler and RNG APIs. Arc devices lacking FP64 should use
+BF16 or FP32 training, not FP16 GradScaler.
+
 
 Montreal Forced Aligner remains an external command-line dependency because its
 Kaldi runtime is not self-contained through PyPI on every platform.
@@ -168,7 +177,20 @@ The cached-feature dataset, collator and staged trainer are implemented. See
 [TRAINING.md](TRAINING.md) for the feature schema, audit command, freeze/unfreeze
 recipe, 5 -> 15 -> 30 -> 60 second curriculum and epoch-boundary resume.
 The trainer supports mixed precision, gradient checkpointing, target-only
-supervision and speaker-disjoint validation.
+supervision and speaker-disjoint validation across CPU, CUDA/ROCm and XPU.
+Checkpoint format 2 stores the selected accelerator's RNG and requires the
+same backend/device index for resume. Format 1 training resume is no longer
+supported; inference state dictionaries remain backend-independent.
+
+The waveform codec is now an independent `svae` workspace package under
+`packages/svae`, with `svae-train` and `svae-export` commands. It trains from
+WAVs without transcripts using a frozen SSL teacher, reconstruction/KL and
+native multi-period/multi-band GAN objectives. It exports the paired codec and
+encoder-only weights consumed by CtrlSpeech. Codec training does not import
+CtrlSpeech. See [TRAINING.md](TRAINING.md) for member-only uv commands and the
+small-model CPU verification limits; pretrained semantic quality and AMD/Arc
+hardware performance remain unverified.
+
 
 Producing a usable Japanese checkpoint still requires real corpus preparation
 and quality evaluation:

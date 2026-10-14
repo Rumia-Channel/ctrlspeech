@@ -41,11 +41,49 @@ recommended; the package requires Python 3.10 or newer.
 
 ```bash
 uv python install 3.11
-uv sync --extra japanese --group dev
+# Choose exactly ONE of the following backend profiles:
+uv sync --extra cpu --extra japanese --group dev
+uv sync --extra cuda --extra japanese --group dev
+uv sync --extra rocm --extra japanese --group dev
+uv sync --extra xpu --extra japanese --group dev
 ```
 
-Use `uv run` for commands so they always execute inside the project
-environment.
+Requires **uv >= 0.12.1**. The four backend extras are mutually exclusive; do
+not use `--all-extras`. Always retain the selected backend and language extras
+with `uv run`, or use `uv run --no-sync` after syncing. An unqualified sync/run
+does not select a backend profile. The examples below use CPU; replace `cpu`
+with your selected profile when running on a GPU.
+
+CPU, CUDA 13.0 and XPU use matched Torch/TorchAudio **2.11.0** builds.
+ROCm uses [AMD's documented binary pair](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html):
+Torch **2.14.0+rocm10.1.0** and
+TorchAudio **2.11.0.3+rocm10.1.0**, including the ROCm SDK and `device-all`
+kernel bundles. This is a larger download than a single-architecture install.
+The exact AMD release has different Linux/Windows metadata; the version-scoped
+uv overrides retain its Linux-only Triton/kernel-bundle requirements without
+adding them to Windows.
+
+GPU profiles provide x86-64 Windows/Linux wheels; a compatible GPU, OS and
+driver are still required. Check the [AMD support matrix](https://rocm.docs.amd.com/en/docs-10.1.0/compatibility/compatibility-matrix.html)
+and [Intel GPU prerequisites](https://docs.pytorch.org/docs/2.11/notes/get_start_xpu.html).
+Drivers are not installed by uv.
+
+Training and inference share `--device auto|cpu|cuda[:N]|rocm[:N]|xpu[:N]`.
+`auto` selects CUDA/ROCm, then XPU, then CPU. Explicit unavailable devices and
+invalid GPU indices fail rather than silently running on CPU. ROCm uses
+PyTorch's CUDA API internally; `--device rocm` additionally requires a HIP build.
+Sampling and the SVAE vocoder use the native Torch path, without requiring
+NVIDIA-only convolution or fused vocoder extensions. Speaker embeddings and
+audio/text preprocessing remain on CPU.
+
+The waveform codec lives in the independent **`svae` workspace package** at
+`packages/svae`; it does not import CtrlSpeech. Use `uv run --package svae
+--extra xpu svae-train ...` for waveform-only training, and `svae-export` to
+publish paired encoder/decoder assets. A member-only sync needs neither the
+Japanese frontend nor the demo/ONNX dependencies. See
+[TRAINING.md](TRAINING.md#svae-を-wav-から学習する) for WAV requirements, the
+frozen SSL teacher, real GAN objectives, checkpoint resume and export usage.
+
 
 **Montreal Forced Aligner** is required for anything that derives phoneme
 boundaries from audio (duration editing, and adopting your own recording as a
@@ -110,24 +148,47 @@ print(batch["linguistic_features"]["accent_pitch"].shape)
 Run the current test suite:
 
 ```bash
-CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run pytest
+CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run --extra cpu --extra japanese pytest
 ```
 
 For a CPU-only development environment (no model weights are downloaded):
 
 ```bash
-uv venv
-uv pip install --torch-backend cpu -e ".[japanese]" --group dev "torch==2.11.0" "torchaudio==2.11.0"
+uv sync --frozen --extra cpu --extra japanese --group dev
 CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run --no-sync pytest -q
 ```
 
-Keep Torch and TorchAudio on matching versions. On PowerShell, set
+Keep the backend's documented binary pair together. On PowerShell, set
 `$env:CTRLSPEECH_TEST_ISOLATE_ONNX = "1"` before running the pytest command.
 The isolation setting prevents the native ONNX runtime from being imported:
 these tests cover real tiny Torch models, text-only OpenJTalk, and stubbed
-speaker/audio integration. They do not validate ONNX inference, real checkpoint
-compatibility, Japanese speech quality, or GPU performance. CI uses this same
+speaker/audio integration. They do not validate ONNX inference, published
+checkpoint compatibility, Japanese speech quality, or GPU performance. CI uses this same
 explicitly limited mode. Hub downloads and Hub telemetry are disabled in tests.
+
+To require an actual accelerator rather than accept CPU, run the small real
+LFM2/DiT/SVAE training, checkpoint-resume, cached sampling and WAV-decoding
+regressions on that machine:
+
+```bash
+CTRLSPEECH_TEST_DEVICE=xpu CTRLSPEECH_TEST_ISOLATE_ONNX=1 uv run --extra xpu --extra japanese pytest -q tests/test_backend_execution.py
+```
+
+For AMD, replace both `xpu` values with `rocm`. On PowerShell, set the two
+environment variables with `$env:NAME = "value"` before the `uv run` command.
+An unavailable requested GPU fails this check; the FP32 case must execute on
+that GPU. Only the BF16 case is skipped when the hardware lacks BF16 support.
+These checks use small models, random weights, synthetic audio and cached
+speaker embeddings; the external CPU ONNX speaker model is not exercised.
+They do not measure trained Japanese voice quality. Normal CPU CI also checks
+simulated accelerator RNG preservation, which is not evidence of GPU execution.
+
+For the independent codec's real training/export checks, set
+`SVAE_TEST_DEVICE=xpu` (or `rocm`) and run `tests/test_svae_training.py` using
+the selected root backend profile. The local SSL teacher has deliberately
+small test weights; this verifies execution, not pretrained semantic quality.
+
+
 
 The production package calls ONNX Runtime's official telemetry opt-out API before
 creating speech sessions. This call follows native import and is not a network
@@ -157,15 +218,15 @@ have verified OpenJTalk phone timings:
 
 ```bash
 # Generate once; target timings describe the requested utterance.
-ctrlspeech --prompt-wav reference.wav --prompt-annotation reference.txt \
+uv run --extra cpu --extra japanese ctrlspeech --prompt-wav reference.wav --prompt-annotation reference.txt \
   --target-annotation target.txt --out generated.wav
 
 # Edit a recording whose canonical timings have already been verified.
-ctrlspeech --audio recording.wav --annotation recording.txt \
+uv run --extra cpu --extra japanese ctrlspeech --audio recording.wav --annotation recording.txt \
   --pitch-shift 2 --out edited.wav
 
 # Stretch an exact morpheme label from the recording's frontend analysis.
-ctrlspeech --audio recording.wav --annotation recording.txt \
+uv run --extra cpu --extra japanese ctrlspeech --audio recording.wav --annotation recording.txt \
   --stretch-word 猫 --stretch-ratio 1.2 --out stretched.wav
 ```
 
@@ -239,6 +300,7 @@ truncated.
 | `CTRLSPEECH_MFA_CACHE` | Where MFA scratch files go (default `~/.cache/ctrlspeech/mfa`) |
 | `CTRLSPEECH_MFA_DICT` | Legacy English aligner dictionary override; not used by `JapaneseMFAAligner` |
 | `CTRLSPEECH_DEMO_MODEL` | Which model the demo loads (default `japanese-lfm2-350m`) |
+| `CTRLSPEECH_DEMO_DEVICE` | Demo device: `auto`, `cpu`, `cuda[:N]`, `rocm[:N]`, or `xpu[:N]` |
 
 The Japanese MFA wrapper uses MFA’s Japanese tokenizer, dictionary and G2P.
 Each invocation has isolated scratch files and a configurable timeout
@@ -259,8 +321,15 @@ ctrlspeech/
   cli.py         the `ctrlspeech` command
   align/         MFA wrapper, 4-line annotation format
   features/      pitch, loudness and speaker-embedding extraction
-  models/        DiTar, LFM2 backbone, LocDiT, SVAE/DAC vocoder
+  models/        DiTar, LFM2 backbone, LocDiT (imports the independent codec API)
   training/      cached features, length curriculum, staged trainer and CLI
+packages/svae/
+  pyproject.toml     independent package and svae-train / svae-export commands
+  src/svae/
+    models/         DAC/BigVGAN codec and native alias-free activations
+    loading.py      paired codec assets and frozen encoding/decoding APIs
+    runtime.py      shared CPU/CUDA/ROCm/XPU and precision selection
+    training/      WAV crops, frozen SSL teacher, GAN trainer, checkpoints, exports
 demo/
   app.py             Panel application
   interactive_plot.py Bokeh contour and phoneme editor
@@ -268,6 +337,7 @@ demo/
 scripts/
   generate.py        CLI entry point for a checkout
 tests/
+  test_backend_execution.py real small model training/resume/sampling/vocoder paths
   test_demo_controls.py  CPU-stub Panel controls and interrupted-upload checks
   test_demo_flow.py      opt-in real GPU/checkpoint/MFA synthesis check
 ```
