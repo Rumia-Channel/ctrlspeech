@@ -33,6 +33,7 @@
 - [ディレクトリ構成](#layout)
 - [ライセンスと利用上の注意](#license)
 - [引用](#citation)
+- [関連論文・技術資料](#references)
 
 <a id="overview"></a>
 ## できることと基本の流れ
@@ -563,3 +564,54 @@ tests/              テスト群
   booktitle = {{Interspeech 2026}},
 }
 ```
+
+<a id="references"></a>
+## 関連論文・技術資料
+
+本リポジトリで使う技術と、その背景を読むための一次資料です。論文の提案手法と、この日本語開発版での採用範囲・変更点を区別して記載します。**掲載論文の評価値や音質を、この実装で再現済みという意味ではありません。**
+
+### 音声生成・制御
+
+1. **CtrlSpeech: Coarse-to-Fine Control for Expressive Speech Synthesis** — Zheng ほか、2026年  
+   [論文（arXiv:2608.08362）](https://arxiv.org/abs/2608.08362)  
+   音素に対応した高さ・音量・長さの条件で、声質を維持しながら局所的な韻律制御を行う原論文です。この日本語版はその制御方式を土台に、自己回帰バックボーンを LFM2.5、コーデックを SARA ベースへ変更しています。
+
+2. **DiTAR: Diffusion Transformer Autoregressive Modeling for Speech Generation** — Jia ほか、2025年  
+   [論文（ICML / PMLR）](https://proceedings.mlr.press/v267/jia25a.html)  
+   音声の連続潜在表現をパッチに分け、長期の系列を自己回帰モデル、各パッチの生成を局所的な拡散 Transformer に分担させる方式です。`ctrlspeech/models/ditar.py` の構成と LocDiT の背景に当たります。
+
+3. **Flow Matching for Generative Modeling** — Lipman ほか、2022年  
+   [論文（arXiv:2210.02747）](https://arxiv.org/abs/2210.02747)  
+   ノイズからデータへ向かうベクトル場を学習し、ODE を解いて生成する Flow Matching の基礎論文です。本実装の LocDiT の学習と、`--steps` で指定する ODE サンプリングを理解するための資料です。
+
+4. **LFM2 Technical Report** — Liquid AI、2025年  
+   [技術報告（arXiv:2511.23404）](https://arxiv.org/abs/2511.23404) ／ [採用モデルの公式カード：LFM2.5-350M-Base](https://huggingface.co/LiquidAI/LFM2.5-350M-Base)  
+   ゲート付きの短い畳み込みと GQA を組み合わせるハイブリッド言語モデルの技術報告です。報告自体は LFM2 のもので、このリポジトリが採用するチェックポイントは **LFM2.5-350M-Base** です。具体的な 10 LIV 畳み込み層＋6 GQA 層などの仕様はモデルカードを参照してください。
+
+### 音声コーデック・表現学習
+
+5. **SARA: A Dual-Stream VAE for High-Fidelity Speech Generation via Integrating Semantic and Acoustic Representations** — Chen ほか、2026年  
+   [論文（arXiv:2606.11611）](https://arxiv.org/abs/2606.11611)  
+   凍結した自己教師あり学習（SSL）モデルの意味表現と、専用の音響エンコーダーを融合する二枝構造の VAE です。`packages/svae` の設計の土台です。原論文の 24 kHz / 64 次元に対し、本実装は標準で **48 kHz / 128 次元・50 Hz** に拡張しています。公式チェックポイントとの互換性はありません。具体的な構造・独自設定は [学習ガイド](TRAINING.md#sara-を-wav-から学習する)を参照してください。
+
+6. **Seamless: Multilingual Expressive and Streaming Speech Translation** — Seamless Communication ほか、2023年  
+   [論文（arXiv:2312.05187）](https://arxiv.org/abs/2312.05187) ／ [W2v-BERT 2.0 の公式モデルカード](https://huggingface.co/facebook/w2v-bert-2.0)  
+   SARA の意味枝で使う **W2v-BERT 2.0** は、この論文の §3.2.1 で説明されています。本実装は `facebook/w2v-bert-2.0` を凍結した特徴抽出器として使い、学習時だけでなく参照音声の符号化にも利用します。Seamless の翻訳システム全体を採用しているわけではありません。
+
+7. **HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis** — Kong ほか、2020年  
+   [論文（arXiv:2010.05646）](https://arxiv.org/abs/2010.05646)  
+   GAN による高速な波形生成と、音声の周期性を扱う判別器の基礎となる論文です。本実装では SARA の潜在表現を入力するデコーダーとして用い、48 kHz の波形を直接復元します。原論文のメルスペクトログラム入力や公開済みボコーダー重みを、そのまま使う構成ではありません。
+
+### 話者特徴・音声解析・アラインメント
+
+8. **CAM++: A Fast and Efficient Network for Speaker Verification Using Context-Aware Masking** — Wang ほか、2023年  
+   [論文（arXiv:2303.00332）](https://arxiv.org/abs/2303.00332)  
+   文脈を考慮したマスキングと D-TDNN による話者特徴抽出の論文です。本実装は `shared/campplus.onnx` を CPU の ONNX Runtime で実行し、参照音声から話者埋め込みを抽出します。CAM++ 自体を学習する機能ではありません。
+
+9. **WORLD: A Vocoder-Based High-Quality Speech Synthesis System for Real-Time Applications** — Morise・Yokomori・Ozawa、2016年  
+   [論文（IEICE / J-STAGE）](https://www.jstage.jst.go.jp/article/transinf/E99.D/7/E99.D_2015EDP7457/_article/-char/en)  
+   音声分析・合成システム WORLD の論文です。本実装では `pyworld` の DIO と StoneMask による F0 推定に利用します。出力音声を合成するボコーダーとして WORLD を使っているわけではありません。
+
+10. **Montreal Forced Aligner: Trainable Text-Speech Alignment Using Kaldi** — McAuliffe ほか、2017年  
+    [論文（Interspeech / ISCA Archive）](https://www.isca-archive.org/interspeech_2017/mcauliffe17_interspeech.html)  
+    書き起こしと音声を対応付け、単語・音素の境界時刻を推定する MFA の原論文です。本リポジトリでは外部コマンドとして連携します。ただし、日本語 MFA と OpenJTalk の音素体系は異なるため、この論文や MFA の導入だけで本実装の正規音素時刻が得られるわけではありません。
